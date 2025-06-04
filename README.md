@@ -1,4 +1,4 @@
-<div align="center"><img src="https://github.com/KAIST-VICLab/SplineGS/blob/main/assets/icon.png?raw=true" width="40", height="20"><h2 style="display: inline; clear:none;">SplineGS:</h2> <h2 style="display: inline; clear:none;">Robust Motion-Adaptive Spline for Real-Time Dynamic 3D Gaussians from Monocular Video</h2></div>
+<div><h2>[CVPR'25] SplineGS: Robust Motion-Adaptive Spline for Real-Time Dynamic 3D Gaussians from Monocular Video</h2></div>
 <br>
 
 **[Jongmin Park](https://sites.google.com/view/jongmin-park)<sup>1\*</sup>, [Minh-Quan Viet Bui](https://quan5609.github.io/)<sup>1\*</sup>, [Juan Luis Gonzalez Bello](https://sites.google.com/view/juan-luis-gb/home)<sup>1</sup>, [Jaeho Moon](https://sites.google.com/view/jaehomoon)<sup>1</sup>, [Jihyong Oh](https://cmlab.cau.ac.kr/)<sup>2†</sup>, [Munchurl Kim](https://www.viclab.kaist.ac.kr/)<sup>1†</sup>** 
