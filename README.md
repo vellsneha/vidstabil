@@ -32,7 +32,7 @@
 - Add DAVIS dataset configurations.
 - Add custom dataset support.
 - Add iPhone dataset configurations.
-## Environmental Setups
+## ⚙️ Environmental Setups
 Clone the repo and install dependencies:
 ```sh
 git clone https://github.com/KAIST-VICLab/SplineGS.git --recursive
