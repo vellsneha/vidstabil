@@ -136,3 +136,8 @@ If you find our repository useful, please consider giving it a star ⭐ and citi
     pages     = {26866-26875}
 }
 ```
+
+
+## 📈 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=KAIST-VICLab/SplineGS&type=Date)](https://www.star-history.com/#KAIST-VICLab/SplineGS&Date)
