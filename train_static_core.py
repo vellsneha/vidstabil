@@ -26,6 +26,7 @@ def prepare_output_dir(expname):
 
 
 def train_static_core(dataset, hyper, opt):
+    lambda_dssim = 0.2  # STEP1.3 L_photo weight for L1 + 0.2*L_SSIM
     stat_gaussians = GaussianModel(dataset)
     pose_holder = GaussianModel(dataset)
     dataset.model_path = args.model_path
@@ -66,9 +67,12 @@ def train_static_core(dataset, hyper, opt):
     pose_optimizer.add_param_group(  # STEP1.2
         {"params": list(cam_spline.parameters()), "lr": opt.pose_lr_init}  # STEP1.2
     )  # STEP1.2
+    for p in cam_spline.parameters():  # STEP1.3
+        p.requires_grad_(False)  # STEP1.3 warm-up: spline frozen
 
     viewpoint_stack_ids = []
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Static core training")
+    iteration = 0  # STEP1.3
 
     for iteration in progress_bar:
         stat_gaussians.update_learning_rate(iteration)
@@ -111,12 +115,25 @@ def train_static_core(dataset, hyper, opt):
 
         # Basic photometric loss (L1 + optional DSSIM).
         ll1 = l1_loss(pred_image, gt_image[:3, :, :])
-        ssim_loss = ssim(pred_image, gt_image) if opt.lambda_dssim != 0 else 0.0
-        photo_loss = ll1 + opt.lambda_dssim * (1.0 - ssim_loss)
+        ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0
+        photo_loss = ll1 + lambda_dssim * (1.0 - ssim_loss)  # STEP1.3 L_photo = L1 + 0.2*L_SSIM
+        loss = photo_loss  # STEP1.3
 
-        photo_loss.backward()
+        # STEP1.3 — stage gate
+        if iteration == 2000:  # STEP1.3
+            for p in cam_spline.parameters():  # STEP1.3
+                p.requires_grad_(True)  # STEP1.3 unfreeze spline
+            print("[STEP1.3] Main stage: spline unfrozen at iteration 2000")  # STEP1.3
 
-        if torch.isnan(photo_loss).any():
+        # STEP1.3 stub — stability losses injected here in Step 1.4
+        if iteration >= 2000:  # STEP1.3
+            stability_loss = torch.tensor(0.0, device=pred_image.device, requires_grad=False)  # STEP1.3
+            # L_smooth, L_jitter, L_fov, L_dilated will replace this stub  # STEP1.3
+            loss = loss + stability_loss  # STEP1.3
+
+        loss.backward()  # STEP1.3
+
+        if torch.isnan(loss).any():  # STEP1.3
             raise RuntimeError("NaN in loss; stopping training.")
 
         stat_gaussians.optimizer.step()
@@ -125,14 +142,17 @@ def train_static_core(dataset, hyper, opt):
         pose_optimizer.zero_grad(set_to_none=True)
 
         current_psnr = psnr(pred_image, gt_image).detach().mean().item()
+        stage = "warmup" if iteration < 2000 else "main"  # STEP1.3
         progress_bar.set_postfix(
             {
-                "photo_loss": f"{photo_loss.detach().item():.6f}",
+                "loss": f"{loss.detach().item():.6f}",  # STEP1.3
                 "psnr": f"{current_psnr:.2f}",
+                "stage": stage,  # STEP1.3
                 "num_gaussians": stat_gaussians.get_xyz.shape[0],
                 "focal": f"{pose_holder._posenet.focal_bias.exp().detach().item():.2f}",
             }
         )
+        iteration += 1  # STEP1.3
 
     # Save as static-only output checkpoint.
     point_cloud_path = os.path.join(args.model_path, "point_cloud", "static_core_final")
