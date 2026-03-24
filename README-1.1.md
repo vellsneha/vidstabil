@@ -55,7 +55,7 @@ This file tracks every step completed to follow the requested scope:
 
 ### 8) Added automated verification script
 
-- Added `verify_static_core.py`.
+- Added `verify-1.1.py`.
 - The script checks that all requested scope constraints are implemented in code.
 
 ### 9) Isolated dynamic spline stack behind an explicit legacy switch
@@ -115,7 +115,7 @@ python train_entrypoint.py --legacy-dynamic -s data/nvidia_rodynrf/<SCENE>/ --ex
 Then verify:
 
 ```bash
-python verify_static_core.py
+python verify-1.1.py
 ```
 
 ## Notes

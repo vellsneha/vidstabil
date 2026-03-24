@@ -9,9 +9,10 @@ import torch
 from arguments import ModelHiddenParams, ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render_static
 from scene import GaussianModel, Scene
+from scene.camera_spline import CameraSpline  # STEP1.2
 from tqdm import tqdm
 from utils.general_utils import safe_state
-from utils.graphics_utils import getWorld2View2
+from utils.graphics_utils import focal2fov, getProjectionMatrix, getWorld2View2, getWorld2View2_torch  # STEP1.2
 from utils.image_utils import psnr
 from utils.loss_utils import l1_loss, ssim
 
@@ -43,13 +44,31 @@ def train_static_core(dataset, hyper, opt):
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     train_cams = [i for i in scene.getTrainCameras()]
+
+    # STEP1.2 — warm-start: collect initial per-frame R, T from pose_network
+    total_frames = len(train_cams)  # STEP1.2
+    _Rs_init, _Ts_init = [], []  # STEP1.2
+    with torch.no_grad():  # STEP1.2
+        for _cam in train_cams:  # STEP1.2
+            _gt_depth = _cam.depth[None].cuda()  # STEP1.2
+            _depth_in = _gt_depth.view(-1, 1)  # STEP1.2
+            _time_in = torch.tensor(_cam.time).float().cuda().view(1, 1)  # STEP1.2
+            _pred_R, _pred_T, _ = pose_holder._posenet(_time_in, depth=_depth_in)  # STEP1.2
+            # Transpose to match the convention expected by update_cam (torch path)  # STEP1.2
+            _Rs_init.append(torch.transpose(_pred_R[0], 1, 0).cpu())  # STEP1.2
+            _Ts_init.append(_pred_T[0].cpu())  # STEP1.2
+    _Rs_init = torch.stack(_Rs_init)  # [N, 3, 3]  # STEP1.2
+    _Ts_init = torch.stack(_Ts_init)  # [N, 3]  # STEP1.2
+
+    cam_spline = CameraSpline(N=total_frames)  # STEP1.2
+    cam_spline.initialize_from_poses(_Rs_init, _Ts_init)  # STEP1.2
+    cam_spline = cam_spline.cuda()  # STEP1.2
+    pose_optimizer.add_param_group(  # STEP1.2
+        {"params": list(cam_spline.parameters()), "lr": opt.pose_lr_init}  # STEP1.2
+    )  # STEP1.2
+
     viewpoint_stack_ids = []
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Static core training")
-
-    # Camera rays are required for rgbdecoder and update_cam.
-    pixels = train_cams[0].metadata.get_pixels(normalize=True)
-    batch_shape = pixels.shape[:-1]
-    pixels = np.reshape(pixels, (-1, 2))
 
     for iteration in progress_bar:
         stat_gaussians.update_learning_rate(iteration)
@@ -63,21 +82,23 @@ def train_static_core(dataset, hyper, opt):
         viewpoint_cam = train_cams[cam_id]
 
         gt_image = viewpoint_cam.original_image.cuda()
-        gt_depth = viewpoint_cam.depth[None].cuda()
-        depth_in = gt_depth.view(-1, 1)
-        time_in = torch.tensor(viewpoint_cam.time).float().cuda().view(1, 1)
-
-        pred_R, pred_T, _ = pose_holder._posenet(time_in, depth=depth_in)
-        focal = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()
-
-        y = (pixels[..., 1] - viewpoint_cam.metadata.principal_point_y) / focal
-        x = (pixels[..., 0] - viewpoint_cam.metadata.principal_point_x) / focal
-        viewdirs = np.stack([x, y, np.ones_like(x)], axis=-1)
-        local_viewdirs = viewdirs / np.linalg.norm(viewdirs, axis=-1, keepdims=True)
-
-        R_ = torch.transpose(pred_R, 2, 1).detach().cpu().numpy()
-        t_ = pred_T.detach().cpu().numpy()
-        viewpoint_cam.update_cam(R_[0], t_[0], local_viewdirs, batch_shape, focal)
+        focal = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()  # STEP1.2
+        R, T = cam_spline.get_pose(float(cam_id))  # STEP1.2
+        # Inline SE(3) camera update — directly sets transforms from spline pose  # STEP1.2
+        viewpoint_cam.FoVy = focal2fov(float(focal), viewpoint_cam.image_height)  # STEP1.2
+        viewpoint_cam.FoVx = focal2fov(float(focal), viewpoint_cam.image_width)  # STEP1.2
+        viewpoint_cam.world_view_transform = getWorld2View2_torch(R, T).transpose(0, 1)  # STEP1.2
+        viewpoint_cam.projection_matrix = getProjectionMatrix(  # STEP1.2
+            znear=viewpoint_cam.znear, zfar=viewpoint_cam.zfar,  # STEP1.2
+            fovX=viewpoint_cam.FoVx, fovY=viewpoint_cam.FoVy,  # STEP1.2
+        ).transpose(0, 1).cuda()  # STEP1.2
+        viewpoint_cam.full_proj_transform = (  # STEP1.2
+            viewpoint_cam.world_view_transform.unsqueeze(0)  # STEP1.2
+            .bmm(viewpoint_cam.projection_matrix.unsqueeze(0))  # STEP1.2
+        ).squeeze(0)  # STEP1.2
+        viewpoint_cam.camera_center = torch.inverse(  # STEP1.2
+            viewpoint_cam.world_view_transform  # STEP1.2
+        )[3, :3]  # STEP1.2
 
         render_pkg = render_static(
             viewpoint_cam=viewpoint_cam,
