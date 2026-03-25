@@ -154,22 +154,34 @@ check("Stability loss stub present in source",
       has_stub,
       "look for: stability_loss = torch.tensor(0.0, ...)")
 
-# ── 8. Stub is additive: loss = loss + stability_loss ────────────────────────
+# ── 8. Stability is additive to photometric loss ─────────────────────────────
 additive_pattern = re.compile(
     r"loss\s*=\s*loss\s*\+\s*stability_loss"
     r"|loss\s*\+=\s*stability_loss"
+    r"|loss\s*=\s*loss\s*\+\s*w_smooth\s*\*\s*loss_smooth"  # STEP1.4 L_smooth
+    r"|loss\s*=\s*loss\s*\+\s*w_fov\s*\*\s*loss_fov"  # STEP1.4 L_fov
+    r"|loss\s*=\s*loss\s*\+\s*w_dilated\s*\*\s*loss_dilated"  # STEP1.4 L_dilated
 )
 has_additive = bool(additive_pattern.search(train_src))
-check("Stub is additive to existing loss (loss = loss + stability_loss)",
-      has_additive)
+check(
+    "Stability term(s) additive to photometric loss",
+    has_additive,
+    "look for: loss = loss + stability_loss OR loss = loss + w_smooth * loss_smooth",
+)
 
-# ── 9. Stub is zero tensor (not computing real terms yet) ─────────────────────
+# ── 9. Stub is zero tensor OR Step 1.4+ real stability terms ─────────────────
 zero_stub_pattern = re.compile(
     r"torch\.tensor\s*\(\s*0\.0"
     r"|torch\.zeros\s*\("
 )
-# Only flag if stub exists — if no stub, check 7 already caught it
-if has_stub:
+has_step14_smooth = "get_translation_second_derivative" in train_src and "loss_smooth" in train_src
+if has_step14_smooth:
+    check(
+        "Step 1.4+ stability (replaces pure zero stub)",
+        True,
+        "loss_smooth / get_translation_second_derivative present",
+    )
+elif has_stub:
     has_zero = bool(zero_stub_pattern.search(train_src))
     check("Stability stub is a zero tensor (no real terms yet — Step 1.4)",
           has_zero,

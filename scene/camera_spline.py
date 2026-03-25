@@ -184,6 +184,45 @@ class CameraSpline(nn.Module):  # STEP1.2
         R_out = self._quat_to_matrix(q_out)  # STEP1.2
         return R_out, T_out  # STEP1.2
 
+    def get_translation_second_derivative(self, t_frame: float) -> torch.Tensor:  # STEP1.4
+        """Analytic d²T/dt² at frame index t_frame in [0, N-1] (translation spline only).
+
+        T(t) is the cubic Hermite segment used in ``get_pose`` for translation.
+        With s = t_ctrl = t_frame * (K-1)/(N-1), u = s - floor(s), and
+        d²/du² of the Hermite basis, we have d²T/dt² = α² d²T/du² where
+        α = (K-1)/(N-1).  Differentiable w.r.t. ``ctrl_trans`` (and thus ``m0``, ``m1``).
+        """  # STEP1.4
+        N = self.N  # STEP1.4
+        K = self.K  # STEP1.4
+        alpha = (K - 1) / max(N - 1, 1)  # ds/dt  # STEP1.4
+        t_ctrl = (  # STEP1.4
+            torch.as_tensor(t_frame, dtype=self.ctrl_trans.dtype, device=self.ctrl_trans.device)  # STEP1.4
+            * alpha  # STEP1.4
+        )  # STEP1.4
+        ii = torch.floor(t_ctrl).long().clamp(0, K - 2)  # STEP1.4
+        i = int(ii.item())  # STEP1.4
+        u = t_ctrl - ii.float()  # local u in [0, 1) on the segment  # STEP1.4
+
+        p0 = self.ctrl_trans[i]  # STEP1.4
+        p1 = self.ctrl_trans[i + 1]  # STEP1.4
+        if i > 0:  # STEP1.4
+            m0 = 0.5 * (self.ctrl_trans[i + 1] - self.ctrl_trans[i - 1])  # STEP1.4
+        else:  # STEP1.4
+            m0 = p1 - p0  # STEP1.4
+        if i + 1 < K - 1:  # STEP1.4
+            m1 = 0.5 * (self.ctrl_trans[i + 2] - self.ctrl_trans[i])  # STEP1.4
+        else:  # STEP1.4
+            m1 = p1 - p0  # STEP1.4
+
+        # Second derivatives of Hermite basis w.r.t. u (same as h00..h11 in get_pose).  # STEP1.4
+        h00_dd = 12.0 * u - 6.0  # STEP1.4
+        h10_dd = 6.0 * u - 4.0  # STEP1.4
+        h01_dd = -12.0 * u + 6.0  # STEP1.4
+        h11_dd = 6.0 * u - 2.0  # STEP1.4
+        T_uu = h00_dd * p0 + h10_dd * m0 + h01_dd * p1 + h11_dd * m1  # d²T/du²  # STEP1.4
+        T_tt = (alpha**2) * T_uu  # STEP1.4
+        return T_tt  # STEP1.4
+
     def get_all_poses(self, N: int):  # STEP1.2
         """Return [(R_0, T_0), ..., (R_{N-1}, T_{N-1})] for frame indices 0..N-1."""  # STEP1.2
         return [self.get_pose(float(t)) for t in range(N)]  # STEP1.2
