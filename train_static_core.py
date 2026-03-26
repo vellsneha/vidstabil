@@ -23,8 +23,10 @@ from utils.loss_utils import l1_loss, ssim
 def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  # STEP1.2 STEP1.4
     """Apply `cam_spline` pose for integer frame index (shared by main render & jitter)."""  # STEP1.4
     R, T = cam_spline.get_pose(float(frame_idx))  # STEP1.2
-    viewpoint_cam.FoVy = focal2fov(float(focal), viewpoint_cam.image_height)  # STEP1.2
-    viewpoint_cam.FoVx = focal2fov(float(focal), viewpoint_cam.image_width)  # STEP1.2
+    focal_val = float(np.asarray(focal).reshape(-1)[0])  # focal may come as numpy array
+    viewpoint_cam.focal = focal_val  # keep Camera fields consistent with intrinsics
+    viewpoint_cam.FoVy = focal2fov(focal_val, viewpoint_cam.image_height)  # STEP1.2
+    viewpoint_cam.FoVx = focal2fov(focal_val, viewpoint_cam.image_width)  # STEP1.2
     viewpoint_cam.world_view_transform = getWorld2View2_torch(R, T).transpose(0, 1)  # STEP1.2
     viewpoint_cam.projection_matrix = getProjectionMatrix(  # STEP1.2
         znear=viewpoint_cam.znear, zfar=viewpoint_cam.zfar,  # STEP1.2
@@ -35,6 +37,16 @@ def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  #
         .bmm(viewpoint_cam.projection_matrix.unsqueeze(0))  # STEP1.2
     ).squeeze(0)  # STEP1.2
     viewpoint_cam.camera_center = torch.inverse(viewpoint_cam.world_view_transform)[3, :3]  # STEP1.2
+
+    # Renderer expects intrinsics matrix K on the right device.
+    dev = viewpoint_cam.projection_matrix.device
+    K = torch.zeros(3, 3, device=dev, dtype=torch.float32)
+    K[0, 0] = focal_val
+    K[1, 1] = focal_val
+    K[0, 2] = float(viewpoint_cam.image_width) * 0.5
+    K[1, 2] = float(viewpoint_cam.image_height) * 0.5
+    K[2, 2] = 1.0
+    viewpoint_cam.K = K
 
 
 def world_to_camera_points(xyz_world, world_view_transform):  # STEP1.4 L_dilated
@@ -78,6 +90,7 @@ def _train_chunked(  # STEP2.1
     T_ref_fov,          # STEP2.1 frozen low-frequency translation reference [N, 3]
     model_path,         # STEP2.1 output directory for per-chunk checkpoints
     scene,              # STEP2.3 global Scene (provides cameras_extent for densification)
+    max_gaussians,      # STEP2.3 hard cap on Gaussian count
 ):  # STEP2.1
     """Per-chunk windowed training for long videos (total_frames > CHUNK_THRESHOLD)."""  # STEP2.1
     lambda_dssim = 0.2  # STEP2.1
@@ -135,7 +148,7 @@ def _train_chunked(  # STEP2.1
             set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, cam_id)  # STEP2.1
 
             render_pkg = render_static(             # STEP2.1
-                viewpoint_cam=viewpoint_cam,        # STEP2.1
+                viewpoint_camera=viewpoint_cam,     # STEP2.1
                 stat_pc=chunk_gaussians,            # STEP2.1
                 dyn_pc=chunk_gaussians,             # STEP2.1
                 bg_color=background,                # STEP2.1
@@ -184,7 +197,7 @@ def _train_chunked(  # STEP2.1
                     focal_np = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()  # STEP2.1
                     set_camera_pose_from_spline(vc, cam_spline, focal_np, vc.uid)            # STEP2.1
                     I0 = render_static(              # STEP2.1
-                        viewpoint_cam=vc,            # STEP2.1
+                        viewpoint_camera=vc,         # STEP2.1
                         stat_pc=chunk_gaussians,     # STEP2.1
                         dyn_pc=chunk_gaussians,      # STEP2.1
                         bg_color=background,         # STEP2.1
@@ -192,7 +205,7 @@ def _train_chunked(  # STEP2.1
                     )["render"]                      # STEP2.1
                     set_camera_pose_from_spline(vc_next, cam_spline, focal_np, vc_next.uid)  # STEP2.1
                     I1 = render_static(              # STEP2.1
-                        viewpoint_cam=vc_next,       # STEP2.1
+                        viewpoint_camera=vc_next,    # STEP2.1
                         stat_pc=chunk_gaussians,     # STEP2.1
                         dyn_pc=chunk_gaussians,      # STEP2.1
                         bg_color=background,         # STEP2.1
@@ -215,7 +228,7 @@ def _train_chunked(  # STEP2.1
 
                     set_camera_pose_from_spline(vc0, cam_spline, focal_np, vc0.uid)  # STEP2.1
                     pkg0 = render_static(          # STEP2.1
-                        viewpoint_cam=vc0,         # STEP2.1
+                        viewpoint_camera=vc0,      # STEP2.1
                         stat_pc=chunk_gaussians,   # STEP2.1
                         dyn_pc=chunk_gaussians,    # STEP2.1
                         bg_color=background,       # STEP2.1
@@ -223,7 +236,7 @@ def _train_chunked(  # STEP2.1
                     )                              # STEP2.1
                     set_camera_pose_from_spline(vc1, cam_spline, focal_np, vc1.uid)  # STEP2.1
                     pkg1 = render_static(          # STEP2.1
-                        viewpoint_cam=vc1,         # STEP2.1
+                        viewpoint_camera=vc1,      # STEP2.1
                         stat_pc=chunk_gaussians,   # STEP2.1
                         dyn_pc=chunk_gaussians,    # STEP2.1
                         bg_color=background,       # STEP2.1
@@ -282,12 +295,12 @@ def _train_chunked(  # STEP2.1
                         chunk_flag_s = controlgaussians(                         # STEP2.3
                             opt, chunk_gaussians, opt.densify,                   # STEP2.3
                             local_iter, scene, chunk_flag_s)                     # STEP2.3
-                        # STEP2.3 — hard cap at MAX_GAUSSIANS
-                        if chunk_gaussians.get_xyz.shape[0] > MAX_GAUSSIANS:    # STEP2.3
+                        # STEP2.3 — hard cap at max_gaussians
+                        if chunk_gaussians.get_xyz.shape[0] > max_gaussians:    # STEP2.3
                             chunk_gaussians.prune_points(                        # STEP2.3
                                 chunk_gaussians.get_opacity.squeeze() <         # STEP2.3
                                 chunk_gaussians.get_opacity.squeeze()           # STEP2.3
-                                .topk(MAX_GAUSSIANS).values.min()              # STEP2.3
+                                .topk(max_gaussians).values.min()              # STEP2.3
                             )  # STEP2.3 keep only top-MAX_GAUSSIANS by opacity
 
         print(f"[STEP2.1] Chunk {chunk_idx} done "          # STEP2.1
@@ -391,6 +404,7 @@ def train_static_core(dataset, hyper, opt):
             T_ref_fov,                 # STEP2.1
             args.model_path,           # STEP2.1
             scene,                     # STEP2.3
+            MAX_GAUSSIANS,             # STEP2.3
         )                              # STEP2.1
     else:  # STEP2.1 — short video, original single-scene path unchanged
         viewpoint_stack_ids = []
@@ -414,7 +428,7 @@ def train_static_core(dataset, hyper, opt):
             set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, cam_id)  # STEP1.2
 
             render_pkg = render_static(
-                viewpoint_cam=viewpoint_cam,
+                viewpoint_camera=viewpoint_cam,
                 stat_pc=stat_gaussians,
                 dyn_pc=stat_gaussians,
                 bg_color=background,
@@ -463,7 +477,7 @@ def train_static_core(dataset, hyper, opt):
                     focal_np = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()  # STEP1.4
                     set_camera_pose_from_spline(vc, cam_spline, focal_np, t_pair)  # STEP1.4
                     I0 = render_static(  # STEP1.4
-                        viewpoint_cam=vc,  # STEP1.4
+                        viewpoint_camera=vc,  # STEP1.4
                         stat_pc=stat_gaussians,  # STEP1.4
                         dyn_pc=stat_gaussians,  # STEP1.4
                         bg_color=background,  # STEP1.4
@@ -471,7 +485,7 @@ def train_static_core(dataset, hyper, opt):
                     )["render"]  # STEP1.4
                     set_camera_pose_from_spline(vc, cam_spline, focal_np, t_pair + 1)  # STEP1.4
                     I1 = render_static(  # STEP1.4
-                        viewpoint_cam=vc,  # STEP1.4
+                        viewpoint_camera=vc,  # STEP1.4
                         stat_pc=stat_gaussians,  # STEP1.4
                         dyn_pc=stat_gaussians,  # STEP1.4
                         bg_color=background,  # STEP1.4
@@ -494,7 +508,7 @@ def train_static_core(dataset, hyper, opt):
 
                     set_camera_pose_from_spline(vc0, cam_spline, focal_np, t0)  # STEP1.4
                     pkg0 = render_static(  # STEP1.4
-                        viewpoint_cam=vc0,
+                        viewpoint_camera=vc0,
                         stat_pc=stat_gaussians,
                         dyn_pc=stat_gaussians,
                         bg_color=background,
@@ -502,7 +516,7 @@ def train_static_core(dataset, hyper, opt):
                     )
                     set_camera_pose_from_spline(vc1, cam_spline, focal_np, t1)  # STEP1.4
                     pkg1 = render_static(  # STEP1.4
-                        viewpoint_cam=vc1,
+                        viewpoint_camera=vc1,
                         stat_pc=stat_gaussians,
                         dyn_pc=stat_gaussians,
                         bg_color=background,
