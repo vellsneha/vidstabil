@@ -37,6 +37,8 @@ def main():
         print("[preflight] GPU checks passed.\n")
 
     # STEP1.2: cam_spline now replaces pose_network in static core
+    # STEP2.1: chunked windowed path active for total_frames > CHUNK_THRESHOLD
+    # STEP2.3: densification_interval=200, MAX_GAUSSIANS=500K
     root = Path(__file__).resolve().parent
     target = root / ("train.py" if args.legacy_dynamic else "train_static_core.py")
 

@@ -132,7 +132,7 @@ class OptimizationParams(ParamGroup):
         self.weight_constraint_after = 0.2
         self.weight_decay_iteration = 5_000
         self.opacity_reset_interval = 3_000
-        self.densification_interval = 1_00
+        self.densification_interval = 200  # STEP2.3 was 100
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold_coarse = 0.0002
