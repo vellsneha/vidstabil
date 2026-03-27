@@ -527,25 +527,64 @@ def readNvidiaInfo(args):
     
     ply_path = os.path.join(path, "dummy_points3D.ply")
 
+    # Build an initial point cloud by back-projecting sparse depth samples from
+    # training frames. This avoids degenerate all-zero initialisation.
+    sample_stride = 16
+    max_init_points = 20000
     totalxyz = []
     totalrgb = []
     totaltime = []
+    for cam in train_cam_infos:
+        if cam.depth is None:
+            continue
+        depth = np.asarray(cam.depth).squeeze()
+        if depth.ndim != 2:
+            continue
+        h, w = depth.shape
+        ys = np.arange(0, h, sample_stride, dtype=np.int32)
+        xs = np.arange(0, w, sample_stride, dtype=np.int32)
+        if ys.size == 0 or xs.size == 0:
+            continue
+        yy, xx = np.meshgrid(ys, xs, indexing="ij")
+        zz = depth[yy, xx]
+        valid = np.isfinite(zz) & (zz > 1e-6)
+        if not np.any(valid):
+            continue
 
-    start_time = 0
+        fx = float(cam.metadata.focal_length.reshape(-1)[0])
+        cx = float(cam.metadata.principal_point.reshape(-1)[0])
+        cy = float(cam.metadata.principal_point.reshape(-1)[1])
+        x = (xx.astype(np.float32) - cx) / max(fx, 1e-6) * zz
+        y = (yy.astype(np.float32) - cy) / max(fx, 1e-6) * zz
+        pts = np.stack([x, y, zz], axis=-1)[valid]
 
-    xyz, rgb = np.zeros((1, 3)), np.zeros((1, 3))
+        img_np = np.asarray(cam.image).astype(np.float32) / 255.0
+        cols = img_np[yy, xx][valid]
+        if cols.shape[-1] > 3:
+            cols = cols[..., :3]
 
-    for i in range(start_time, start_time + max_time):
-        totalxyz.append(xyz)
-        totalrgb.append(rgb)
-        totaltime.append(np.ones((xyz.shape[0], 1)) * (i - start_time) / max_time)
+        tvals = np.full((pts.shape[0], 1), float(cam.time), dtype=np.float32)
+        totalxyz.append(pts.astype(np.float32))
+        totalrgb.append(cols.astype(np.float32))
+        totaltime.append(tvals)
 
-    xyz = np.concatenate(totalxyz, axis=0)
-    rgb = np.concatenate(totalrgb, axis=0)
-    totaltime = np.concatenate(totaltime, axis=0)
-    assert xyz.shape[0] == rgb.shape[0]
-    xyzt = np.concatenate((xyz, totaltime), axis=1)
-    storePly(ply_path, xyzt, rgb)
+    if len(totalxyz) == 0:
+        # Fallback: tiny random cloud around z=1 if depth is missing/corrupt.
+        xyz = np.random.uniform(low=[-0.1, -0.1, 0.8], high=[0.1, 0.1, 1.2], size=(1024, 3)).astype(np.float32)
+        rgb = np.full((1024, 3), 0.5, dtype=np.float32)
+        t = np.zeros((1024, 1), dtype=np.float32)
+    else:
+        xyz = np.concatenate(totalxyz, axis=0)
+        rgb = np.concatenate(totalrgb, axis=0)
+        t = np.concatenate(totaltime, axis=0)
+        if xyz.shape[0] > max_init_points:
+            idx = np.linspace(0, xyz.shape[0] - 1, max_init_points).astype(np.int64)
+            xyz = xyz[idx]
+            rgb = rgb[idx]
+            t = t[idx]
+    assert xyz.shape[0] == rgb.shape[0] == t.shape[0]
+    xyzt = np.concatenate((xyz, t), axis=1)
+    storePly(ply_path, xyzt, (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8))
     try:
         pcd = fetchPly(ply_path)
 

@@ -23,11 +23,24 @@ from utils.loss_utils import l1_loss, ssim
 def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  # STEP1.2 STEP1.4
     """Apply `cam_spline` pose for integer frame index (shared by main render & jitter)."""  # STEP1.4
     R, T = cam_spline.get_pose(float(frame_idx))  # STEP1.2
+    # Guard against occasional invalid/ill-conditioned pose outputs.
+    if (not torch.isfinite(R).all()) or (not torch.isfinite(T).all()):
+        R = torch.eye(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+        T = torch.zeros(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+    else:
+        # Project to nearest valid rotation matrix (SO(3)) for numerical stability.
+        U, _, Vh = torch.linalg.svd(R)
+        R = U @ Vh
+        if torch.linalg.det(R) < 0:
+            U[:, -1] *= -1
+            R = U @ Vh
+
     focal_val = float(np.asarray(focal).reshape(-1)[0])  # focal may come as numpy array
     viewpoint_cam.focal = focal_val  # keep Camera fields consistent with intrinsics
     viewpoint_cam.FoVy = focal2fov(focal_val, viewpoint_cam.image_height)  # STEP1.2
     viewpoint_cam.FoVx = focal2fov(focal_val, viewpoint_cam.image_width)  # STEP1.2
-    viewpoint_cam.world_view_transform = getWorld2View2_torch(R, T).transpose(0, 1)  # STEP1.2
+    w2c = getWorld2View2_torch(R, T)
+    viewpoint_cam.world_view_transform = w2c.transpose(0, 1)  # STEP1.2
     viewpoint_cam.projection_matrix = getProjectionMatrix(  # STEP1.2
         znear=viewpoint_cam.znear, zfar=viewpoint_cam.zfar,  # STEP1.2
         fovX=viewpoint_cam.FoVx, fovY=viewpoint_cam.FoVy,  # STEP1.2
@@ -36,7 +49,8 @@ def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  #
         viewpoint_cam.world_view_transform.unsqueeze(0)  # STEP1.2
         .bmm(viewpoint_cam.projection_matrix.unsqueeze(0))  # STEP1.2
     ).squeeze(0)  # STEP1.2
-    viewpoint_cam.camera_center = torch.inverse(viewpoint_cam.world_view_transform)[3, :3]  # STEP1.2
+    # Camera center for x_cam = R^T x_world + T is C = -R * T.
+    viewpoint_cam.camera_center = -(R @ T)
 
     # Renderer expects intrinsics matrix K on the right device.
     dev = viewpoint_cam.projection_matrix.device
@@ -608,6 +622,38 @@ def train_static_core(dataset, hyper, opt):
         gt_Rt = getWorld2View2(cam.R, cam.T, cam.trans, cam.scale)
         trajectory.append(np.linalg.inv(gt_Rt))
     np.save(os.path.join(point_cloud_path, "train_cam_c2w_gt.npy"), np.stack(trajectory, axis=0))
+
+    # Save learned spline trajectory + control points for downstream rendering.
+    learned_c2w = []
+    with torch.no_grad():
+        for t_idx in range(total_frames):
+            R_t, T_t = cam_spline.get_pose(float(t_idx))
+            if (not torch.isfinite(R_t).all()) or (not torch.isfinite(T_t).all()):
+                R_t = torch.eye(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+                T_t = torch.zeros(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+            else:
+                # Keep exported trajectories numerically stable on SO(3).
+                U, _, Vh = torch.linalg.svd(R_t)
+                R_t = U @ Vh
+                if torch.linalg.det(R_t) < 0:
+                    U[:, -1] *= -1
+                    R_t = U @ Vh
+
+            # For w2c = [R_t^T | T_t], c2w has rotation R_t and translation -R_t @ T_t.
+            c2w = torch.eye(4, device=R_t.device, dtype=R_t.dtype)
+            c2w[:3, :3] = R_t
+            c2w[:3, 3] = -(R_t @ T_t)
+            learned_c2w.append(c2w.detach().cpu().numpy())
+        np.save(
+            os.path.join(point_cloud_path, "train_cam_c2w_spline.npy"),
+            np.stack(learned_c2w, axis=0),
+        )
+        np.savez(
+            os.path.join(point_cloud_path, "cam_spline_controls.npz"),
+            ctrl_trans=cam_spline.ctrl_trans.detach().cpu().numpy(),
+            ctrl_quats=cam_spline.ctrl_quats.detach().cpu().numpy(),
+            n_frames=np.array([total_frames], dtype=np.int32),
+        )
 
 
 def setup_seed(seed):
