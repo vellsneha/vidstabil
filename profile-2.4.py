@@ -1,5 +1,5 @@
 """
-profile_2.4.py
+profile-2.4.py
 --------------
 Step 2.4 — Efficiency Target Check.
 
@@ -10,13 +10,13 @@ Steps 2.1–2.3 are complete. It profiles training and tells you:
   - Exactly what to change (densification interval or L_jitter frequency)
 
 Usage:
-    python profile_2.4.py -s data/NUS/<SCENE>/ --expname profile_run \
-                          --profile_iters 500 [--no_gpu_sync]
+    python profile-2.4.py -s data/NUS/<SCENE>/ --expname profile_run \
+                          --profile_iters 100 [--no_gpu_sync]
 
 Arguments:
     -s / --source_path   Path to NUS scene (same as train_entrypoint.py)
     --expname            Output name (profiling output saved here)
-    --profile_iters      How many iterations to time (default 500 — fast)
+    --profile_iters      How many iterations to time (default 100 — fast)
     --no_gpu_sync        Skip torch.cuda.synchronize() — faster but less
                          accurate timing (use only for quick checks)
 
@@ -36,7 +36,6 @@ Outputs:
     - Saves results to profile_results_<expname>.json
 """
 
-import argparse
 import json
 import os
 import sys
@@ -45,19 +44,18 @@ import random
 from contextlib import contextmanager
 from collections import defaultdict
 
-# ── argument parsing ──────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Step 2.4 efficiency profiler")
-parser.add_argument("-s", "--source_path", required=True,
-                    help="Path to NUS scene directory")
-parser.add_argument("--expname", default="profile_run",
-                    help="Experiment name for output")
-parser.add_argument("--profile_iters", type=int, default=500,
-                    help="Number of iterations to profile (default 500)")
-parser.add_argument("--no_gpu_sync", action="store_true",
-                    help="Skip CUDA synchronization for faster (less accurate) timing")
-parser.add_argument("--total_iters", type=int, default=10000,
-                    help="Total training iterations to project time for")
-args = parser.parse_args()
+# PERF — standalone argparse, no conflict with training pipeline
+import argparse as _argparse  # PERF
+_parser = _argparse.ArgumentParser(  # PERF
+    description="Step 2.4 efficiency profiler",  # PERF
+    add_help=True,  # PERF
+)  # PERF
+_parser.add_argument("-s", "--source_path", required=True)  # PERF
+_parser.add_argument("--expname", default="profile_run")  # PERF
+_parser.add_argument("--profile_iters", type=int, default=100)  # PERF
+_parser.add_argument("--no_gpu_sync", action="store_true")  # PERF
+_parser.add_argument("--total_iters", type=int, default=10000)  # PERF
+args = _parser.parse_args()  # PERF
 
 GPU_SYNC = not args.no_gpu_sync
 
@@ -446,7 +444,7 @@ else:
         print(f"    # STEP2.4 — subsample smooth loss for efficiency")
 
     print(f"\n  After applying the fix, re-run:")
-    print(f"    python profile_2.4.py -s {args.source_path} "
+    print(f"    python profile-2.4.py -s {args.source_path} "
           f"--expname {args.expname}_v2")
     print(f"  Repeat until projected time <= 10 min.\n")
 

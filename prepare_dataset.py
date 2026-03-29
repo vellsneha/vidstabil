@@ -23,77 +23,90 @@ python train_entrypoint.py -s "$SCENE" --expname regular_fast_run
 import os, glob, shutil
 import numpy as np
 from PIL import Image
+#!/usr/bin/env python3
+"""
+Converts extracted frames into VidStabil dataset format.
+Fixed: Step 6 uses a single shared dummy file instead of n² writes.
+"""
 
-# ========================
-# CONFIG — change paths
-# ========================
-SRC_FRAMES = "/workspace/vidstabil/data/test_clip/images"  # your ffmpeg PNGs
-SCENE = "/workspace/vidstabil/data/regular_scene"          # dataset folder to create
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+SRC_FRAMES = "/workspace/vidstabil/data3/test_clip/images"
+SCENE      = "/workspace/vidstabil/data3/crowd9_scene"
 
-# ========================
-# Step 1: create folder structure
-# ========================
-os.makedirs(os.path.join(SCENE, "images_2"), exist_ok=True)
-os.makedirs(os.path.join(SCENE, "gt"), exist_ok=True)
-os.makedirs(os.path.join(SCENE, "uni_depth"), exist_ok=True)
-os.makedirs(os.path.join(SCENE, "instance_mask"), exist_ok=True)
-os.makedirs(os.path.join(SCENE, "bootscotracker_dynamic"), exist_ok=True)
-os.makedirs(os.path.join(SCENE, "bootscotracker_static"), exist_ok=True)
+# ── Step 1: folder structure ──────────────────────────────────────────────────
+for d in ["images_2", "gt", "uni_depth", "instance_mask",
+          "bootscotracker_dynamic", "bootscotracker_static"]:
+    os.makedirs(os.path.join(SCENE, d), exist_ok=True)
 
-# ========================
-# Step 2: copy & rename frames -> images_2/000.png
-# ========================
+# ── Step 2: copy frames → images_2/000.png ────────────────────────────────────
 frame_paths = sorted(glob.glob(os.path.join(SRC_FRAMES, "*.png")))
 assert frame_paths, f"No PNGs found in {SRC_FRAMES}"
+n = len(frame_paths)
 
 for i, p in enumerate(frame_paths):
-    dst_path = os.path.join(SCENE, "images_2", f"{i:03d}.png")
-    shutil.copy2(p, dst_path)
-print(f"Copied {len(frame_paths)} frames to images_2/")
+    shutil.copy2(p, os.path.join(SCENE, "images_2", f"{i:03d}.png"))
+print(f"[1/5] Copied {n} frames to images_2/")
 
-# ========================
-# Step 3: copy frames to gt/v000_t###.png
-# ========================
-for i, p in enumerate(sorted(glob.glob(os.path.join(SCENE, "images_2", "*.png")))):
-    dst_path = os.path.join(SCENE, "gt", f"v000_t{i:03d}.png")
-    shutil.copy2(p, dst_path)
-print(f"Copied {len(frame_paths)} frames to gt/")
+# ── Step 3: copy frames → gt/v000_t###.png ───────────────────────────────────
+for i in range(n):
+    shutil.copy2(
+        os.path.join(SCENE, "images_2", f"{i:03d}.png"),
+        os.path.join(SCENE, "gt", f"v000_t{i:03d}.png")
+    )
+print(f"[2/5] Copied {n} frames to gt/")
 
-# ========================
-# Step 4: create dummy instance_mask
-# ========================
-for i, p in enumerate(sorted(glob.glob(os.path.join(SCENE, "images_2", "*.png")))):
-    im = Image.open(p)
-    w, h = im.size
-    mask = Image.new("L", (w, h), 0)
+# ── Step 4: dummy instance_mask ───────────────────────────────────────────────
+im0  = Image.open(frame_paths[0])
+w, h = im0.size
+mask = Image.new("L", (w, h), 0)
+
+# Save one shared mask file, symlink the rest
+shared_mask_dir = os.path.join(SCENE, "instance_mask", "000")
+os.makedirs(shared_mask_dir, exist_ok=True)
+shared_mask_path = os.path.join(shared_mask_dir, "000.png")
+mask.save(shared_mask_path)
+
+for i in range(1, n):
     mask_dir = os.path.join(SCENE, "instance_mask", f"{i:03d}")
     os.makedirs(mask_dir, exist_ok=True)
-    mask.save(os.path.join(mask_dir, "000.png"))
-print(f"Created dummy instance_mask for {len(frame_paths)} frames")
+    dst = os.path.join(mask_dir, "000.png")
+    if not os.path.exists(dst):
+        os.symlink(shared_mask_path, dst)  # symlink, not copy
+print(f"[3/5] Created dummy instance_mask for {n} frames")
 
-# ========================
-# Step 5: create dummy uni_depth
-# ========================
-for i, p in enumerate(sorted(glob.glob(os.path.join(SCENE, "images_2", "*.png")))):
-    im = Image.open(p)
-    w, h = im.size
-    depth = np.ones((h, w, 1), dtype=np.float32)
-    np.save(os.path.join(SCENE, "uni_depth", f"{i:03d}.npy"), depth)
-print(f"Created dummy uni_depth for {len(frame_paths)} frames")
+# ── Step 5: dummy uni_depth ───────────────────────────────────────────────────
+depth = np.ones((h, w, 1), dtype=np.float32)
+shared_depth = os.path.join(SCENE, "uni_depth", "shared_depth.npy")
+np.save(shared_depth, depth)
 
-# ========================
-# Step 6: create dummy bootscotracker files
-# ========================
-n = len(frame_paths)
-track = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
+for i in range(n):
+    dst = os.path.join(SCENE, "uni_depth", f"{i:03d}.npy")
+    if not os.path.exists(dst):
+        os.symlink(shared_depth, dst)  # symlink, not copy
+print(f"[4/5] Created dummy uni_depth for {n} frames")
+
+# ── Step 6: dummy bootscotracker — ONE shared file, symlinks for all pairs ────
+# Critical fix: original wrote n² files. This writes 1 and symlinks the rest.
+track       = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
+shared_dyn  = os.path.join(SCENE, "bootscotracker_dynamic", "shared.npy")
+shared_stat = os.path.join(SCENE, "bootscotracker_static",  "shared.npy")
+np.save(shared_dyn,  track)
+np.save(shared_stat, track)
 
 for q in range(n):
     qn = f"{q:03d}"
     for t in range(n):
-        tn = f"{t:03d}"
-        np.save(os.path.join(SCENE, "bootscotracker_dynamic", f"{qn}_{tn}.npy"), track)
-        np.save(os.path.join(SCENE, "bootscotracker_static", f"{qn}_{tn}.npy"), track)
-print(f"Created dummy bootscotracker files for {n} frames (pairs: {n*n})")
+        tn  = f"{t:03d}"
+        dyn = os.path.join(SCENE, "bootscotracker_dynamic", f"{qn}_{tn}.npy")
+        sta = os.path.join(SCENE, "bootscotracker_static",  f"{qn}_{tn}.npy")
+        if not os.path.exists(dyn):
+            os.symlink(shared_dyn,  dyn)
+        if not os.path.exists(sta):
+            os.symlink(shared_stat, sta)
 
-print("\nDataset preparation complete!")
-print(f"Your dataset is ready at: {SCENE}")
+print(f"[5/5] Created bootscotracker symlinks ({n*n} pairs, 2 real files)")
+
+print(f"\nDone. Dataset ready at: {SCENE}")
+print(f"Frames: {n} | Resolution: {w}x{h}")
+print(f"\nRun training:")
+print(f"  python train_entrypoint.py -s {SCENE} --expname my_run")

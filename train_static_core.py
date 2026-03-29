@@ -19,6 +19,17 @@ from utils.fov_loss import frozen_low_frequency_translation_reference  # STEP1.4
 from utils.jitter_loss import loss_jitter_pixel_diff, loss_jitter_raft_laplacian  # STEP1.4 L_jitter
 from utils.loss_utils import l1_loss, ssim
 
+# Monte Carlo estimate of (1/N) sum_t over smooth / FoV terms; caps forward+backward cost per iter.
+STABILITY_LOSS_FRAME_SAMPLE = 256
+
+
+def _stability_loss_frame_indices(n_frames: int, max_samples: int, device: torch.device) -> torch.Tensor:
+    """Frame indices in [0, n_frames) for L_smooth / L_fov (uniform subsample when n_frames > max_samples)."""
+    m = min(max_samples, n_frames)
+    if m >= n_frames:
+        return torch.arange(n_frames, device=device, dtype=torch.long)
+    return torch.randperm(n_frames, device=device)[:m]
+
 
 def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  # STEP1.2 STEP1.4
     """Apply `cam_spline` pose for integer frame index (shared by main render & jitter)."""  # STEP1.4
@@ -179,29 +190,24 @@ def _train_chunked(  # STEP2.1
             # path; active after the chunk warm-up gate (local_iter >= CHUNK_WARMUP).
             if local_iter >= CHUNK_WARMUP:  # STEP2.1
 
-                # L_smooth: (1/N) sum_t || d²T/dt²(t) ||² over this chunk's frames.
-                acc_smooth = torch.zeros(  # STEP2.1
-                    (), device=cam_spline.ctrl_trans.device,  # STEP2.1
-                    dtype=cam_spline.ctrl_trans.dtype)        # STEP2.1
-                for t_idx in range(c_start, c_end):  # STEP2.1
-                    d2T = cam_spline.get_translation_second_derivative(float(t_idx))  # STEP2.1
-                    acc_smooth = acc_smooth + (d2T * d2T).sum()                       # STEP2.1
-                loss_smooth = acc_smooth / float(chunk_n_frames)  # STEP2.1
-                loss = loss + w_smooth * loss_smooth              # STEP2.1
+                # L_smooth / L_fov: unbiased subsample of chunk frames (same expectation as full mean).
+                dev = cam_spline.ctrl_trans.device
+                dt = cam_spline.ctrl_trans.dtype
+                m_sub = min(STABILITY_LOSS_FRAME_SAMPLE, chunk_n_frames)
+                if m_sub >= chunk_n_frames:
+                    idx = torch.arange(c_start, c_end, device=dev, dtype=torch.long)
+                else:
+                    rel = torch.randperm(chunk_n_frames, device=dev)[:m_sub]
+                    idx = rel + c_start
 
-                # L_fov: (1/N) sum_t || T(t) - T_bar(t) ||² over this chunk's frames.
-                Tbar_chunk = T_ref_fov[c_start:c_end].to(  # STEP2.1
-                    device=cam_spline.ctrl_trans.device,    # STEP2.1
-                    dtype=cam_spline.ctrl_trans.dtype)      # STEP2.1
-                acc_fov = torch.zeros(  # STEP2.1
-                    (), device=cam_spline.ctrl_trans.device,  # STEP2.1
-                    dtype=cam_spline.ctrl_trans.dtype)        # STEP2.1
-                for t_idx in range(c_start, c_end):  # STEP2.1
-                    _, T_cur = cam_spline.get_pose(float(t_idx))  # STEP2.1
-                    diff = T_cur - Tbar_chunk[t_idx - c_start]   # STEP2.1
-                    acc_fov = acc_fov + (diff * diff).sum()       # STEP2.1
-                loss_fov = acc_fov / float(chunk_n_frames)  # STEP2.1
-                loss = loss + w_fov * loss_fov              # STEP2.1
+                acc = cam_spline.get_translation_second_derivatives_at(idx)
+                loss_smooth = (acc ** 2).sum(dim=-1).mean()
+                loss = loss + w_smooth * loss_smooth
+
+                Ts_now = cam_spline.get_translations_at(idx)
+                Tbar_s = T_ref_fov[idx].to(device=dev, dtype=dt)
+                loss_fov = ((Ts_now - Tbar_s) ** 2).sum(dim=-1).mean()
+                loss = loss + w_fov * loss_fov
 
                 # L_jitter: pixel-diff or RAFT+Laplacian; expensive — every 10 iters.
                 if chunk_n_frames >= 2 and local_iter % 10 == 0:  # STEP2.1
@@ -391,6 +397,7 @@ def train_static_core(dataset, hyper, opt):
     cam_spline.initialize_from_poses(_Rs_init, _Ts_init)  # STEP1.2
     cam_spline = cam_spline.cuda()  # STEP1.2
     with torch.no_grad():  # STEP1.4 L_fov — frozen low-frequency reference from initial translations
+        # PERF confirmed — T_ref_fov computed once before loop
         T_ref_fov = frozen_low_frequency_translation_reference(_Ts_init.cuda().float())  # STEP1.4 [N,3] detached
     pose_optimizer.add_param_group(  # STEP1.2
         {"params": list(cam_spline.parameters()), "lr": opt.pose_lr_init}  # STEP1.2
@@ -465,23 +472,19 @@ def train_static_core(dataset, hyper, opt):
 
             # STEP1.4 — stability losses (main stage; spline trainable)
             if iteration >= 2000:  # STEP1.3
-                # STEP1.4 L_smooth: (1/N) sum_t || d²T/dt²(t) ||² — translation Hermite, closed form
-                acc_smooth = torch.zeros((), device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
-                for t_idx in range(total_frames):  # STEP1.4
-                    d2T = cam_spline.get_translation_second_derivative(float(t_idx))  # STEP1.4
-                    acc_smooth = acc_smooth + (d2T * d2T).sum()  # STEP1.4 ||·||² per frame
-                loss_smooth = acc_smooth / float(total_frames)  # STEP1.4
-                loss = loss + w_smooth * loss_smooth  # STEP1.4
+                # STEP1.4 L_smooth / L_fov — subsampled Monte Carlo mean (same expectation as full (1/N) sum).
+                dev = cam_spline.ctrl_trans.device
+                dt = cam_spline.ctrl_trans.dtype
+                idx = _stability_loss_frame_indices(
+                    total_frames, STABILITY_LOSS_FRAME_SAMPLE, dev)
+                acc = cam_spline.get_translation_second_derivatives_at(idx)
+                loss_smooth = (acc ** 2).sum(dim=-1).mean()
+                loss = loss + w_smooth * loss_smooth
 
-                # STEP1.4 L_fov: (1/N) sum_t || T(t) - T_bar(t) ||^2 — T_bar frozen from smoothed init poses
-                Tbar = T_ref_fov.to(device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)  # STEP1.4
-                acc_fov = torch.zeros((), device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)  # STEP1.4
-                for t_idx in range(total_frames):  # STEP1.4
-                    _, T_cur = cam_spline.get_pose(float(t_idx))  # STEP1.4
-                    diff = T_cur - Tbar[t_idx]  # STEP1.4 translation difference (same convention as get_pose)
-                    acc_fov = acc_fov + (diff * diff).sum()  # STEP1.4
-                loss_fov = acc_fov / float(total_frames)  # STEP1.4
-                loss = loss + w_fov * loss_fov  # STEP1.4
+                Ts_now = cam_spline.get_translations_at(idx)
+                Tbar_s = T_ref_fov[idx].to(device=dev, dtype=dt)
+                loss_fov = ((Ts_now - Tbar_s) ** 2).sum(dim=-1).mean()
+                loss = loss + w_fov * loss_fov
 
                 # STEP1.4 L_jitter: || nabla^2 (I_{t+1}-I_t) ||_F (pixel diff); RAFT+Laplacian after iter 7000
                 # Expensive: only every 10 iterations.
@@ -615,6 +618,24 @@ def train_static_core(dataset, hyper, opt):
     os.makedirs(point_cloud_path, exist_ok=True)
     stat_gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud_static.ply"))
     torch.save(pose_holder._posenet.state_dict(), os.path.join(point_cloud_path, "posenet.pth"))
+
+    # RENDER_PREP — save spline control points
+    spline_ckpt_path = os.path.join(  # RENDER_PREP
+        scene.model_path,  # RENDER_PREP
+        "point_cloud",  # RENDER_PREP
+        "static_core_final",  # RENDER_PREP
+        "cam_spline.pth",  # RENDER_PREP
+    )  # RENDER_PREP
+    torch.save(  # RENDER_PREP
+        {  # RENDER_PREP
+            "ctrl_trans": cam_spline.ctrl_trans.data.cpu(),  # RENDER_PREP
+            "ctrl_quats": cam_spline.ctrl_quats.data.cpu(),  # RENDER_PREP
+            "N": cam_spline.N,  # RENDER_PREP
+            "K": cam_spline.K,  # RENDER_PREP
+        },  # RENDER_PREP
+        spline_ckpt_path,  # RENDER_PREP
+    )  # RENDER_PREP
+    print(f"[RENDER_PREP] Spline saved to {spline_ckpt_path}")  # RENDER_PREP
 
     # Write pose trajectory for quick sanity checks.
     trajectory = []
