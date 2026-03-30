@@ -174,14 +174,56 @@ def lpips_loss(img1, img2, lpips_model):
 
 
 def l1_loss(network_output, gt, mask=None):
-    if mask is not None:
+    if mask is None:
+        return torch.abs(network_output - gt).mean()
+
+    mask = mask.to(device=gt.device, dtype=gt.dtype)
+
+    # gt can be [C,H,W] or [B,C,H,W]
+    if gt.dim() == 3:
+        channel = gt.shape[0]
+
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)  # [H,W] -> [1,H,W]
+        elif mask.dim() == 3:
+            if mask.shape[0] not in (1, channel):
+                if mask.shape[-1] in (1, channel):
+                    mask = mask.permute(2, 0, 1)
+                else:
+                    raise ValueError(f"Unexpected 3D mask shape for CHW image: {mask.shape}")
+        else:
+            raise ValueError(f"Unexpected mask shape for CHW image: {mask.shape}")
+
+        if mask.shape[0] == 1:
+            mask = mask.expand(channel, -1, -1)
+
+    elif gt.dim() == 4:
         channel = gt.shape[1]
-        mask = mask.expand(-1, channel, -1, -1)
-        return torch.abs((network_output - gt) * mask).sum() / (mask.sum() + 1e-8)
+
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [H,W] -> [1,1,H,W]
+        elif mask.dim() == 3:
+            if mask.shape[0] == gt.shape[0]:
+                mask = mask.unsqueeze(1)  # [B,H,W] -> [B,1,H,W]
+            elif mask.shape[0] == 1:
+                mask = mask.unsqueeze(1)  # [1,H,W] -> [1,1,H,W]
+            elif mask.shape[-1] == 1:
+                mask = mask.permute(2, 0, 1).unsqueeze(0)  # [H,W,1] -> [1,1,H,W]
+            else:
+                raise ValueError(f"Unexpected 3D mask shape for BCHW image: {mask.shape}")
+        elif mask.dim() == 4:
+            if mask.shape[-1] == 1 and mask.shape[1] != 1:
+                mask = mask.permute(0, 3, 1, 2)  # [B,H,W,1] -> [B,1,H,W]
+        else:
+            raise ValueError(f"Unexpected mask shape for BCHW image: {mask.shape}")
+
+        if mask.shape[1] == 1:
+            mask = mask.expand(-1, channel, -1, -1)
+
     else:
-        return torch.abs((network_output - gt)).mean()
+        raise ValueError(f"Unexpected gt shape: {gt.shape}")
 
-
+    return torch.abs((network_output - gt) * mask).sum() / (mask.sum() + 1e-8)
 def photometric_loss_masked_dynamic(pred, gt, M_t, lambda_dssim, ssim_fn):
     """
     Step 3.1 — masked photometric term (L1 + optional DSSIM), excluding moving pixels.
