@@ -48,6 +48,7 @@ class Camera(nn.Module):
         target_visibility=None,
         target_tracks_static=None,
         target_visibility_static=None,
+        dynamic_mask_t=None,
     ):
         super(Camera, self).__init__()
 
@@ -116,6 +117,16 @@ class Camera(nn.Module):
         self.target_visibility_static = (
             torch.Tensor(target_visibility_static).to(self.data_device) if target_visibility_static is not None else None
         )
+
+        # STEP3.1 — M_t: [1, H, W], 1 on moving objects (excluded from photometric loss via 1 - M_t)
+        self.dynamic_mask_t = None
+        if dynamic_mask_t is not None:
+            dm = torch.as_tensor(np.asarray(dynamic_mask_t), dtype=torch.float32, device=self.data_device)
+            if dm.ndim == 2:
+                dm = dm.unsqueeze(0)
+            elif dm.ndim == 3 and dm.shape[-1] == 1:
+                dm = dm.permute(2, 0, 1)
+            self.dynamic_mask_t = dm.clamp(0.0, 1.0)
 
         self.trans = trans
         self.scale = scale

@@ -69,6 +69,9 @@ class ModelParams(ParamGroup):
         self.add_points = False
         self.extension = ".png"
         self.llffhold = 8
+        # STEP3.1 — masked photometric loss: load cached M_t from <source>/<dynamic_mask_subdir>/
+        self.use_dynamic_mask = False
+        self.dynamic_mask_subdir = "dynamic_masks"
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

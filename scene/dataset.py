@@ -56,6 +56,7 @@ class FourDGSdataset(Dataset):
                 target_visibility=caminfo.target_visibility,
                 target_tracks_static=caminfo.target_tracks_static,
                 target_visibility_static=caminfo.target_visibility_static,
+                dynamic_mask_t=getattr(caminfo, "dynamic_mask_t", None),
             )
         else:
             return self.dataset[index]

@@ -64,7 +64,8 @@ class CameraInfo(NamedTuple):
     target_visibility: Optional[np.array] = None
     target_tracks_static: Optional[np.array] = None
     target_visibility_static: Optional[np.array] = None
-
+    # STEP3.1 — binary mask M_t (H, W) float {0,1}: 1 = moving object, 0 = background
+    dynamic_mask_t: Optional[np.array] = None
 
 
 class SceneInfo(NamedTuple):
@@ -367,6 +368,7 @@ def readNvidiaCameras(args):
             disp_list.append(aligned_disp)   
         mean_disp = np.mean(np.stack(disp_list, 0))
 
+    _dm_warned_missing = False  # STEP3.1 — one warning if masks enabled but files missing
     for idx in range(num_frames):
         frame_name = f"{idx:03d}.png"
         img_path = os.path.join(path, "images_2", frame_name)
@@ -432,6 +434,26 @@ def readNvidiaCameras(args):
             target_tracks_static = None
             # target_visibility_static = None
 
+        # STEP3.1 — cached dynamic-object mask M_t (Grounded SAM 2 preprocessing)
+        dynamic_mask_t = None
+        if getattr(args, "use_dynamic_mask", False):
+            dm_root = os.path.join(path, getattr(args, "dynamic_mask_subdir", "dynamic_masks"))
+            dm_path = os.path.join(dm_root, frame_name)
+            if os.path.isfile(dm_path):
+                dm = (
+                    PILtoTorch(Image.open(dm_path).convert("L"), (int(sh[1]), int(sh[0])))
+                    .squeeze(0)
+                    .numpy()
+                )
+                dynamic_mask_t = (dm > 0.5).astype(np.float32)
+            else:
+                if not _dm_warned_missing:
+                    print(
+                        f"[STEP3.1] WARNING: dynamic masks enabled but files missing under {dm_root} "
+                        f"(e.g. {dm_path}) — L_photo will be unmasked until masks exist."
+                    )
+                    _dm_warned_missing = True
+
         # read instance mask
         instance_path = os.path.join(path, "instance_mask", frame_name.split(".")[0] + "/*.png")
         instance_mask_list = []
@@ -467,6 +489,7 @@ def readNvidiaCameras(args):
             instance_mask=instance_mask_list,
             target_tracks=target_tracks,
             target_tracks_static=target_tracks_static,
+            dynamic_mask_t=dynamic_mask_t,
         )
         train_cam_infos.append(cam_info)
 

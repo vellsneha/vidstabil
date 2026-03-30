@@ -182,6 +182,27 @@ def l1_loss(network_output, gt, mask=None):
         return torch.abs((network_output - gt)).mean()
 
 
+def photometric_loss_masked_dynamic(pred, gt, M_t, lambda_dssim, ssim_fn):
+    """
+    Step 3.1 — masked photometric term (L1 + optional DSSIM), excluding moving pixels.
+
+    M_t: float tensor [1, H, W] in [0, 1], **1 on dynamic / moving objects**, 0 on static background.
+    Implements the L1 part of
+        L_photo = ||(I_rendered - I_input) ⊙ (1 - M_t)||_1
+    using the same normalised masked mean as `l1_loss` (divide by sum of weights).
+    DSSIM is applied to images multiplied by (1 - M_t) per channel so dynamic regions
+    do not dominate the SSIM term.
+    """
+    w = 1.0 - M_t.clamp(0.0, 1.0)
+    if w.shape[-2:] != pred.shape[-2:]:
+        w = F.interpolate(w.unsqueeze(0), size=pred.shape[-2:], mode="nearest").squeeze(0)
+    ll1 = l1_loss(pred, gt, mask=w)
+    if lambda_dssim == 0:
+        return ll1
+    w3 = w.expand_as(gt)
+    return ll1 + lambda_dssim * (1.0 - ssim_fn(pred * w3, gt * w3))
+
+
 def l2_loss(network_output, gt, mask=None):
     if mask is not None:
         channel = gt.shape[1]

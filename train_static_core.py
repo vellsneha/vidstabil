@@ -17,7 +17,7 @@ from utils.graphics_utils import focal2fov, getProjectionMatrix, getWorld2View2,
 from utils.image_utils import psnr
 from utils.fov_loss import frozen_low_frequency_translation_reference  # STEP1.4 L_fov
 from utils.jitter_loss import loss_jitter_pixel_diff, loss_jitter_raft_laplacian  # STEP1.4 L_jitter
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, photometric_loss_masked_dynamic, ssim
 
 # Monte Carlo estimate of (1/N) sum_t over smooth / FoV terms; caps forward+backward cost per iter.
 STABILITY_LOSS_FRAME_SAMPLE = 256
@@ -116,6 +116,7 @@ def _train_chunked(  # STEP2.1
     model_path,         # STEP2.1 output directory for per-chunk checkpoints
     scene,              # STEP2.3 global Scene (provides cameras_extent for densification)
     max_gaussians,      # STEP2.3 hard cap on Gaussian count
+    use_masked_photo=False,  # STEP3.1 masked L_photo when dynamic_mask_t present
 ):  # STEP2.1
     """Per-chunk windowed training for long videos (total_frames > CHUNK_THRESHOLD)."""  # STEP2.1
     lambda_dssim = 0.2  # STEP2.1
@@ -181,10 +182,15 @@ def _train_chunked(  # STEP2.1
             )                                       # STEP2.1
             pred_image = render_pkg["render"]       # STEP2.1
 
-            # Photometric loss — identical formula to single-scene path.
-            ll1 = l1_loss(pred_image, gt_image[:3, :, :])                              # STEP2.1
-            ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0       # STEP2.1
-            loss = ll1 + lambda_dssim * (1.0 - ssim_loss)                              # STEP2.1
+            # Photometric loss — identical formula to single-scene path (STEP3.1 optional mask).
+            if use_masked_photo and getattr(viewpoint_cam, "dynamic_mask_t", None) is not None:  # STEP3.1
+                M = viewpoint_cam.dynamic_mask_t.cuda()  # STEP3.1
+                loss = photometric_loss_masked_dynamic(  # STEP3.1
+                    pred_image, gt_image[:3, :, :], M, lambda_dssim, ssim)  # STEP3.1
+            else:  # STEP3.1
+                ll1 = l1_loss(pred_image, gt_image[:3, :, :])                              # STEP2.1
+                ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0       # STEP2.1
+                loss = ll1 + lambda_dssim * (1.0 - ssim_loss)                              # STEP2.1
 
             # Stability losses — same terms, weights, and frequencies as single-scene
             # path; active after the chunk warm-up gate (local_iter >= CHUNK_WARMUP).
@@ -378,6 +384,8 @@ def train_static_core(dataset, hyper, opt):
 
     train_cams = [i for i in scene.getTrainCameras()]
 
+    use_masked_photo = bool(getattr(dataset, "use_dynamic_mask", False))  # STEP3.1
+
     # STEP1.2 — warm-start: collect initial per-frame R, T from pose_network
     total_frames = len(train_cams)  # STEP1.2
     _Rs_init, _Ts_init = [], []  # STEP1.2
@@ -426,6 +434,7 @@ def train_static_core(dataset, hyper, opt):
             args.model_path,           # STEP2.1
             scene,                     # STEP2.3
             MAX_GAUSSIANS,             # STEP2.3
+            use_masked_photo=use_masked_photo,  # STEP3.1
         )                              # STEP2.1
     else:  # STEP2.1 — short video, original single-scene path unchanged
         viewpoint_stack_ids = []
@@ -457,10 +466,15 @@ def train_static_core(dataset, hyper, opt):
             )
             pred_image = render_pkg["render"]
 
-            # Basic photometric loss (L1 + optional DSSIM).
-            ll1 = l1_loss(pred_image, gt_image[:3, :, :])
-            ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0
-            photo_loss = ll1 + lambda_dssim * (1.0 - ssim_loss)  # STEP1.3 L_photo = L1 + 0.2*L_SSIM
+            # Basic photometric loss (L1 + optional DSSIM); STEP3.1 excludes dynamic pixels via M_t.
+            if use_masked_photo and getattr(viewpoint_cam, "dynamic_mask_t", None) is not None:  # STEP3.1
+                M = viewpoint_cam.dynamic_mask_t.cuda()  # STEP3.1
+                photo_loss = photometric_loss_masked_dynamic(  # STEP3.1
+                    pred_image, gt_image[:3, :, :], M, lambda_dssim, ssim)  # STEP3.1
+            else:  # STEP3.1
+                ll1 = l1_loss(pred_image, gt_image[:3, :, :])
+                ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0
+                photo_loss = ll1 + lambda_dssim * (1.0 - ssim_loss)  # STEP1.3 L_photo = L1 + 0.2*L_SSIM
             loss = photo_loss  # STEP1.3
 
             # STEP1.3 — stage gate
