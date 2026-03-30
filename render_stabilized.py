@@ -2,7 +2,7 @@
 import os  # RENDER_PREP
 import subprocess  # RENDER_PREP
 import sys  # RENDER_PREP
-from argparse import ArgumentParser  # RENDER_PREP
+from argparse import ArgumentParser, Namespace  # RENDER_PREP
 import cv2  # RENDER_PREP
 import torch  # RENDER_PREP
 from tqdm import tqdm  # RENDER_PREP
@@ -16,7 +16,6 @@ def main():  # RENDER_PREP
     lp = ModelParams(parser)  # RENDER_PREP
     pp = PipelineParams(parser)  # RENDER_PREP
     hp = ModelHiddenParams(parser)  # RENDER_PREP
-    parser.add_argument("-s", "--source_path", type=str, required=True)  # RENDER_PREP
     parser.add_argument("--expname", type=str, required=True)  # RENDER_PREP
     parser.add_argument("--output_video", type=str, required=True)  # RENDER_PREP
     parser.add_argument("--fps", type=int, default=30)  # RENDER_PREP
