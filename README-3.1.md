@@ -116,7 +116,7 @@ Default backend is **`gsam2`** (integrated). Typical runtime is on the order of 
 
 ```bash
 cd vidstabil
-python preprocess_dynamic_masks.py -s /path/to/scene --backend gsam2 --text-prompt "person . car ."
+python preprocess_dynamic_masks.py -s /path/to/your/scene --backend gsam2 --text-prompt "person ."
 ```
 
 Options include `--grounding-model`, `--sam2-checkpoint`, `--sam2-model-config`, `--box-threshold`, `--text-threshold`, `--force-cpu`.
@@ -134,7 +134,7 @@ python preprocess_dynamic_masks.py -s /path/to/scene --backend synthetic
 ## Training with masks
 
 ```bash
-python train_entrypoint.py -s /path/to/scene --expname masked_run --use_dynamic_mask
+python train_entrypoint.py -s /path/to/your/scene --expname masked_run --use_dynamic_mask
 ```
 
 Ensure `dynamic_masks/` exists and aligns with `images_2/` frame count when `use_dynamic_mask` is enabled.

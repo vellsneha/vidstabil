@@ -285,9 +285,20 @@ def normalize_coords(coords, h, w):
     return coords / torch.tensor([w - 1.0, h - 1.0], device=coords.device) * 2 - 1.0
 
 def get_tracks(path, num_frames, is_static=False):
+    tracks_dir = os.path.join(path, "bootscotracker_static" if is_static else "bootscotracker_dynamic")
+    if not os.path.isdir(tracks_dir):
+        return None
+
+    # Treat tracks as optional unless the full expected n x n set exists.
+    # This avoids crashes from partially generated directories after aborted runs.
+    for qi in range(num_frames):
+        for ti in range(num_frames):
+            expected = os.path.join(tracks_dir, f"{qi:03d}_{ti:03d}.npy")
+            if not os.path.isfile(expected):
+                return None
+
     target_tracks_all = []
     for idx in range(num_frames):
-        tracks_dir = os.path.join(path,"bootscotracker_static" if is_static else "bootscotracker_dynamic")
         target_inds_all = torch.from_numpy(np.arange(num_frames))
         target_tracks_all.append(load_target_tracks(tracks_dir, idx, target_inds_all.tolist(), dim=0))
     target_tracks_all = torch.cat(target_tracks_all, dim=1)
@@ -316,7 +327,8 @@ def readNvidiaCameras(args):
         os.mkdir(normal_dir)
 
 
-    # read dynamic track
+    # read dynamic/static tracks if available.
+    # Static-core training does not use these, but legacy dynamic training still can.
     num_frames = max_time + 1
     target_tracks = get_tracks(path, num_frames)
     target_tracks_static = get_tracks(path, num_frames, is_static=True)
@@ -424,9 +436,11 @@ def readNvidiaCameras(args):
         # tracklet = tracklet_fwd
         
         if idx == 0:
-            target_tracks = target_tracks.cpu().numpy()
+            target_tracks = target_tracks.cpu().numpy() if target_tracks is not None else None
             # target_visibility = target_visibility.cpu().numpy()
-            target_tracks_static = target_tracks_static.cpu().numpy()
+            target_tracks_static = (
+                target_tracks_static.cpu().numpy() if target_tracks_static is not None else None
+            )
             # target_visibility_static = target_visibility_static.cpu().numpy()
         else:
             target_tracks = None
@@ -454,7 +468,9 @@ def readNvidiaCameras(args):
                     )
                     _dm_warned_missing = True
 
-        # read instance mask
+        # read instance mask (optional)
+        # Historically this repo required at least one per-frame instance mask and would crash if missing.
+        # Real datasets often don't ship instance masks; training defaults to not using them.
         instance_path = os.path.join(path, "instance_mask", frame_name.split(".")[0] + "/*.png")
         instance_mask_list = []
         for mask_path in sorted(glob.glob(instance_path)):
@@ -463,11 +479,16 @@ def readNvidiaCameras(args):
             )
             instance_mask[instance_mask > 0] = 1
             instance_mask_list.append(instance_mask)
-        instance_mask_list = np.stack(instance_mask_list, 0)
 
-        new_mask = np.zeros_like(instance_mask_list[0])
-        for instance in instance_mask_list:
-            new_mask = np.maximum(new_mask, instance)
+        if len(instance_mask_list) == 0:
+            # Shape: (K, H, W, 1) where K=1 to keep downstream code stable.
+            new_mask = np.zeros((int(sh[0]), int(sh[1]), 1), dtype=np.float32)
+            instance_mask_list = np.stack([new_mask], 0)
+        else:
+            instance_mask_list = np.stack(instance_mask_list, 0)
+            new_mask = np.zeros_like(instance_mask_list[0])
+            for instance in instance_mask_list:
+                new_mask = np.maximum(new_mask, instance)
 
         cam_info = CameraInfo(
             uid=idx,

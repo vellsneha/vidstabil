@@ -1,112 +1,198 @@
-"""
-We now need to convert your extracted frames into the dataset format that VidStabil expects:
-1. images_2/ → 3-digit PNG frames (000.png, 001.png …)
-2. gt/ → copy of images renamed v000_t000.png …
-3. uni_depth/ → dummy .npy depth files for each frame
-4. instance_mask/ → dummy masks (must exist, at least one per frame)
-5. bootscotracker_dynamic/ & bootscotracker_static/ → dummy track files for every pair
-
-So,
-1. Take your extracted frames (%05d.png)
-2. Rename & copy to images_2/
-3. Copy frames to gt/
-4. Create dummy instance_mask/
-5. Create dummy uni_depth/
-6. Create dummy bootscotracker_dynamic/ and bootscotracker_static/
-
-then to train, run this
-
-python train_entrypoint.py -s "$SCENE" --expname regular_fast_run
-"""
-
-#!/usr/bin/env python3
-import os, glob, shutil
-import numpy as np
-from PIL import Image
 #!/usr/bin/env python3
 """
-Converts extracted frames into VidStabil dataset format.
-Fixed: Step 6 uses a single shared dummy file instead of n² writes.
+Prepare a real VidStabil "scene" directory from extracted frames.
+
+This script used to generate *dummy* depth/masks/tracks under ``/workspace/vidstabil/data``.
+It now focuses on building the expected folder layout and (optionally) running the
+real preprocessing steps:
+
+- images_2/:   000.png, 001.png, ...
+- gt/:         v000_t000.png, v000_t001.png, ...
+- uni_depth/:  per-frame .npy depth (optional: generate via gen_depth.py)
+- bootscotracker_dynamic/ + bootscotracker_static/: (optional: generate via gen_tracks.py)
+- instance_mask/: optional; if absent, training will proceed with empty instance masks
+  (see hardened loader in ``scene/dataset_readers.py``).
+
+Typical pipeline:
+  1) python prepare_dataset.py --src-frames /path/to/frames --scene /path/to/scene --gen-depth --gen-tracks --motion-masks /path/to/motion_masks
+  2) python preprocess_dynamic_masks.py -s /path/to/scene --backend gsam2 --text-prompt "person ."
+  3) python train_entrypoint.py -s /path/to/scene --expname my_run --use_dynamic_mask
 """
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-SRC_FRAMES = "/workspace/vidstabil/data3/test_clip/images"
-SCENE      = "/workspace/vidstabil/data3/crowd9_scene"
+from __future__ import annotations
 
-# ── Step 1: folder structure ──────────────────────────────────────────────────
-for d in ["images_2", "gt", "uni_depth", "instance_mask",
-          "bootscotracker_dynamic", "bootscotracker_static"]:
-    os.makedirs(os.path.join(SCENE, d), exist_ok=True)
+import argparse
+import glob
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
-# ── Step 2: copy frames → images_2/000.png ────────────────────────────────────
-frame_paths = sorted(glob.glob(os.path.join(SRC_FRAMES, "*.png")))
-assert frame_paths, f"No PNGs found in {SRC_FRAMES}"
-n = len(frame_paths)
 
-for i, p in enumerate(frame_paths):
-    shutil.copy2(p, os.path.join(SCENE, "images_2", f"{i:03d}.png"))
-print(f"[1/5] Copied {n} frames to images_2/")
+def _ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
 
-# ── Step 3: copy frames → gt/v000_t###.png ───────────────────────────────────
-for i in range(n):
-    shutil.copy2(
-        os.path.join(SCENE, "images_2", f"{i:03d}.png"),
-        os.path.join(SCENE, "gt", f"v000_t{i:03d}.png")
+
+def _list_pngs(src_frames: str) -> list[str]:
+    paths = sorted(glob.glob(os.path.join(src_frames, "*.png")))
+    if not paths:
+        raise FileNotFoundError(f"No PNG frames found in: {src_frames}")
+    return paths
+
+
+def _link_or_copy(src: str, dst: str, *, mode: str) -> None:
+    if os.path.exists(dst):
+        return
+    if mode == "symlink":
+        os.symlink(os.path.abspath(src), dst)
+    elif mode == "copy":
+        shutil.copy2(src, dst)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+
+def _prepare_frames(src_frames: str, scene: str, *, mode: str) -> int:
+    frame_paths = _list_pngs(src_frames)
+    _ensure_dir(os.path.join(scene, "images_2"))
+    _ensure_dir(os.path.join(scene, "gt"))
+
+    for i, src in enumerate(frame_paths):
+        _link_or_copy(src, os.path.join(scene, "images_2", f"{i:03d}.png"), mode=mode)
+    for i in range(len(frame_paths)):
+        _link_or_copy(
+            os.path.join(scene, "images_2", f"{i:03d}.png"),
+            os.path.join(scene, "gt", f"v000_t{i:03d}.png"),
+            mode=mode,
+        )
+    return len(frame_paths)
+
+
+def _copy_motion_masks(motion_masks: str, scene: str, *, mode: str) -> str:
+    src = motion_masks
+    if not os.path.isdir(src):
+        raise FileNotFoundError(f"--motion-masks must be a directory: {src}")
+    dst = os.path.join(scene, "motion_masks")
+    _ensure_dir(dst)
+    masks = sorted(glob.glob(os.path.join(src, "*.png")))
+    if not masks:
+        raise FileNotFoundError(f"No PNG masks found in: {src}")
+    for m in masks:
+        _link_or_copy(m, os.path.join(dst, os.path.basename(m)), mode=mode)
+    return dst
+
+
+def _run(cmd: list[str]) -> None:
+    print("[prepare_dataset] Running:", " ".join(cmd))
+    subprocess.check_call(cmd)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Prepare real dataset scene from frames.")
+    p.add_argument("--src-frames", required=True, help="Directory of extracted PNG frames.")
+    p.add_argument("--scene", required=True, help="Output scene directory to create/use.")
+    p.add_argument(
+        "--mode",
+        choices=("copy", "symlink"),
+        default="symlink",
+        help="How to place frames/masks into the scene (default: symlink).",
     )
-print(f"[2/5] Copied {n} frames to gt/")
+    p.add_argument("--gen-depth", action="store_true", help="Generate uni_depth/ using gen_depth.py")
+    p.add_argument(
+        "--depth-model",
+        default="v2",
+        help="UniDepth model variant passed to gen_depth.py (default: v2).",
+    )
+    p.add_argument(
+        "--depth-type",
+        choices=("depth", "disp"),
+        default="depth",
+        help="Depth output type for gen_depth.py (default: depth).",
+    )
+    p.add_argument("--gen-tracks", action="store_true", help="Generate bootscotracker_* using gen_tracks.py")
+    p.add_argument(
+        "--motion-masks",
+        default=None,
+        help="Directory containing per-frame motion masks PNGs (used for gen_tracks.py).",
+    )
+    p.add_argument("--grid-size-dynamic", type=int, default=256)
+    p.add_argument("--grid-size-static", type=int, default=50)
+    args = p.parse_args()
 
-# ── Step 4: dummy instance_mask ───────────────────────────────────────────────
-im0  = Image.open(frame_paths[0])
-w, h = im0.size
-mask = Image.new("L", (w, h), 0)
+    scene = os.path.abspath(args.scene)
+    src_frames = os.path.abspath(args.src_frames)
+    _ensure_dir(scene)
 
-# Save one shared mask file, symlink the rest
-shared_mask_dir = os.path.join(SCENE, "instance_mask", "000")
-os.makedirs(shared_mask_dir, exist_ok=True)
-shared_mask_path = os.path.join(shared_mask_dir, "000.png")
-mask.save(shared_mask_path)
+    n = _prepare_frames(src_frames, scene, mode=args.mode)
+    print(f"[prepare_dataset] Frames prepared: {n} -> {os.path.join(scene, 'images_2')}")
 
-for i in range(1, n):
-    mask_dir = os.path.join(SCENE, "instance_mask", f"{i:03d}")
-    os.makedirs(mask_dir, exist_ok=True)
-    dst = os.path.join(mask_dir, "000.png")
-    if not os.path.exists(dst):
-        os.symlink(shared_mask_path, dst)  # symlink, not copy
-print(f"[3/5] Created dummy instance_mask for {n} frames")
+    if args.motion_masks is not None:
+        mm_dst = _copy_motion_masks(os.path.abspath(args.motion_masks), scene, mode=args.mode)
+        print(f"[prepare_dataset] Motion masks staged at: {mm_dst}")
 
-# ── Step 5: dummy uni_depth ───────────────────────────────────────────────────
-depth = np.ones((h, w, 1), dtype=np.float32)
-shared_depth = os.path.join(SCENE, "uni_depth", "shared_depth.npy")
-np.save(shared_depth, depth)
+    if args.gen_depth:
+        _ensure_dir(os.path.join(scene, "uni_depth"))
+        root = Path(__file__).resolve().parent
+        _run(
+            [
+                sys.executable,
+                str(root / "gen_depth.py"),
+                "--image_dir",
+                os.path.join(scene, "images_2"),
+                "--out_dir",
+                os.path.join(scene, "uni_depth"),
+                "--depth_type",
+                args.depth_type,
+                "--depth_model",
+                args.depth_model,
+            ]
+        )
 
-for i in range(n):
-    dst = os.path.join(SCENE, "uni_depth", f"{i:03d}.npy")
-    if not os.path.exists(dst):
-        os.symlink(shared_depth, dst)  # symlink, not copy
-print(f"[4/5] Created dummy uni_depth for {n} frames")
+    if args.gen_tracks:
+        if args.motion_masks is None:
+            raise SystemExit("--gen-tracks requires --motion-masks (per-frame PNG masks).")
+        root = Path(__file__).resolve().parent
+        dyn_out = os.path.join(scene, "bootscotracker_dynamic")
+        sta_out = os.path.join(scene, "bootscotracker_static")
+        _ensure_dir(dyn_out)
+        _ensure_dir(sta_out)
+        mask_dir = os.path.join(scene, "motion_masks")
+        _run(
+            [
+                sys.executable,
+                str(root / "gen_tracks.py"),
+                "--image_dir",
+                os.path.join(scene, "images_2"),
+                "--mask_dir",
+                mask_dir,
+                "--out_dir",
+                dyn_out,
+                "--grid_size",
+                str(args.grid_size_dynamic),
+            ]
+        )
+        _run(
+            [
+                sys.executable,
+                str(root / "gen_tracks.py"),
+                "--image_dir",
+                os.path.join(scene, "images_2"),
+                "--mask_dir",
+                mask_dir,
+                "--out_dir",
+                sta_out,
+                "--grid_size",
+                str(args.grid_size_static),
+                "--is_static",
+            ]
+        )
 
-# ── Step 6: dummy bootscotracker — ONE shared file, symlinks for all pairs ────
-# Critical fix: original wrote n² files. This writes 1 and symlinks the rest.
-track       = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
-shared_dyn  = os.path.join(SCENE, "bootscotracker_dynamic", "shared.npy")
-shared_stat = os.path.join(SCENE, "bootscotracker_static",  "shared.npy")
-np.save(shared_dyn,  track)
-np.save(shared_stat, track)
+    print("\n[prepare_dataset] Done.")
+    print(f"[prepare_dataset] Scene: {scene}")
+    print("\nNext:")
+    print(f"  python preprocess_dynamic_masks.py -s {scene} --backend gsam2 --text-prompt \"person .\"")
+    print(f"  python train_entrypoint.py -s {scene} --expname my_run")
 
-for q in range(n):
-    qn = f"{q:03d}"
-    for t in range(n):
-        tn  = f"{t:03d}"
-        dyn = os.path.join(SCENE, "bootscotracker_dynamic", f"{qn}_{tn}.npy")
-        sta = os.path.join(SCENE, "bootscotracker_static",  f"{qn}_{tn}.npy")
-        if not os.path.exists(dyn):
-            os.symlink(shared_dyn,  dyn)
-        if not os.path.exists(sta):
-            os.symlink(shared_stat, sta)
 
-print(f"[5/5] Created bootscotracker symlinks ({n*n} pairs, 2 real files)")
-
-print(f"\nDone. Dataset ready at: {SCENE}")
-print(f"Frames: {n} | Resolution: {w}x{h}")
-print(f"\nRun training:")
-print(f"  python train_entrypoint.py -s {SCENE} --expname my_run")
+if __name__ == "__main__":
+    main()

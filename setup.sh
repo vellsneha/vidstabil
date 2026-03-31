@@ -21,5 +21,5 @@ pip install --no-build-isolation git+https://github.com/nerfstudio-project/gspla
 pip install --no-build-isolation ./submodules/simple-knn
 apt update && apt install -y ffmpeg
 # mkdir -p data/test_clip/images
-# ffmpeg -i regular.mp4 -frames:v 150 -q:v 1 data/test_clip/images/%05d.png
+# ffmpeg -i crowd9.mp4 -frames:v 100 -q:v 1 data/test_clip/images/%05d.png
 # ls data2/test_clip/images/ | wc -l

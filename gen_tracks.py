@@ -9,6 +9,7 @@ import os
 from PIL import Image
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from cotracker.utils.visualizer import Visualizer
@@ -32,6 +33,33 @@ def read_mask(folder_path):
     video = torch.from_numpy(video).float()
     return video
 
+
+def maybe_resize_video_and_masks(video, masks, max_hw=None):
+    if max_hw is None or max_hw <= 0:
+        return video, masks, 1.0, 1.0
+
+    _, _, _, height, width = video.shape
+    longest = max(height, width)
+    if longest <= max_hw:
+        return video, masks, 1.0, 1.0
+
+    scale = max_hw / float(longest)
+    new_h = max(1, int(round(height * scale)))
+    new_w = max(1, int(round(width * scale)))
+
+    video_rs = F.interpolate(
+        video.reshape(-1, video.shape[2], height, width),
+        size=(new_h, new_w),
+        mode="bilinear",
+        align_corners=False,
+    ).reshape(video.shape[0], video.shape[1], video.shape[2], new_h, new_w)
+    masks_rs = F.interpolate(
+        masks.reshape(-1, 1, height, width),
+        size=(new_h, new_w),
+        mode="nearest",
+    ).reshape(masks.shape[0], masks.shape[1], 1, new_h, new_w)
+    return video_rs, masks_rs, width / float(new_w), height / float(new_h)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_dir", type=str, required=True, help="image dir")
@@ -49,6 +77,12 @@ def main():
         "--backward_tracking",
         action="store_true",
         help="Compute tracks in both directions, not only forward",
+    )
+    parser.add_argument(
+        "--max_hw",
+        type=int,
+        default=768,
+        help="Downscale longest image side before tracking for speed/memory; 0 disables (default: 768)",
     )
     args = parser.parse_args()
 
@@ -84,8 +118,10 @@ def main():
     masks[masks>0] = 1.
     if args.is_static:
         masks = 1.0 - masks
-    
+
+    video, masks, scale_x, scale_y = maybe_resize_video_and_masks(video, masks, args.max_hw)
     _, num_frames,_, height, width = video.shape
+    print(f"Tracking resolution: {width}x{height} | scale back: x={scale_x:.4f}, y={scale_y:.4f}")
     vis = Visualizer(save_dir=os.path.join(out_dir, "vis"), pad_value=120, linewidth=3)
 
     for t in tqdm(range(num_frames), desc="query frames"):
@@ -95,40 +131,24 @@ def main():
             print(f"Already computed tracks with query {t} {name_t}")
             continue
 
-        current_mask = masks[:,t].unsqueeze(1)
-        start_pred = None
-        
-        for j in range(num_frames):
-            if j > t:
-                current_video = video[:,t:j+1]
-            elif j < t:
-                current_video = torch.flip(video[:,j:t+1], dims=(1,)) # reverse
-            else:
-                continue
-                # current_video = video[:,t:t+1]
-            
-        
+        current_mask = masks[:, t]
+        with torch.no_grad():
             pred_tracks, pred_visibility = model(
-                current_video,
+                video,
                 grid_size=args.grid_size,
-                grid_query_frame=0,
-                backward_tracking=False,
-                segm_mask=current_mask
+                grid_query_frame=t,
+                backward_tracking=True,
+                segm_mask=current_mask,
             )
-            
 
-            pred = torch.cat([pred_tracks, pred_visibility.unsqueeze(-1)], dim=-1)
-            current_pred = pred[0,-1]
-            start_pred = pred[0,0]
+        pred_tracks[..., 0] *= scale_x
+        pred_tracks[..., 1] *= scale_y
+        pred = torch.cat([pred_tracks, pred_visibility.unsqueeze(-1)], dim=-1)
 
-            # save
+        for j in range(num_frames):
             name_j = os.path.splitext(frame_names[j])[0]
+            current_pred = pred[0, j]
             np.save(f"{out_dir}/{name_t}_{name_j}.npy", current_pred.cpu().numpy())
-            
-            # visualize
-            # vis.visualize(current_video, pred_tracks, pred_visibility, filename=f"{name_t}_{name_j}")
-            
-        np.save(f"{out_dir}/{name_t}_{name_t}.npy", start_pred.cpu().numpy())
 
 
 

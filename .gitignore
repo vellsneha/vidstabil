@@ -2,7 +2,6 @@
 .vscode
 .idea
 output
-output_1
 build
 diff_rasterization/diff_rast.egg-info
 diff_rasterization/dist
@@ -10,11 +9,11 @@ tensorboard_3d
 screenshots
 data/
 data
-data2
-data3
 extensions
 lab4d
 preprocess
+output.zip
+data.zip
 venv
 Miniconda3-latest-Linux-x86_64.sh
 Miniconda3-latest-Linux-x86_64.sh.1

@@ -40,6 +40,13 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
+def _motion_mask_for_view(viewpoint, use_dynamic_mask=False):
+    """Prefer cached dynamic masks when enabled; otherwise fall back to legacy instance-derived mask."""
+    if use_dynamic_mask and getattr(viewpoint, "dynamic_mask_t", None) is not None:
+        return viewpoint.dynamic_mask_t
+    return viewpoint.mask
+
+
 def scene_reconstruction(
     dataset,
     opt,
@@ -420,7 +427,11 @@ def scene_reconstruction(
 
                 pred_normal = get_normals(render_pkg["depth"] + 1e-6, camera_metadata)
                 pred_normals.append(pred_normal)
-                motion_masks.append(viewpoint_cam.mask.unsqueeze(0))
+                motion_masks.append(
+                    _motion_mask_for_view(
+                        viewpoint_cam, use_dynamic_mask=getattr(opt, "use_dynamic_mask", False)
+                    ).unsqueeze(0)
+                )
                 if stage == "fine":
                     d_alphas.append(render_pkg["d_alpha"].unsqueeze(0))
                     d_depths.append(render_pkg["d_depth"].unsqueeze(0))
@@ -995,7 +1006,9 @@ def scene_reconstruction(
 
                 if IDX == 0:
                     accum_error = accum_error[0].squeeze(0).detach().cpu().numpy().reshape(-1)
-                    motion_mask = viewpoint_stack[IDX].mask.cuda()
+                    motion_mask = _motion_mask_for_view(
+                        viewpoint_stack[IDX], use_dynamic_mask=getattr(opt, "use_dynamic_mask", False)
+                    ).cuda()
                     motion_error = motion_mask.squeeze(0).cpu().numpy().reshape(-1)
 
                     N_pts = opt.stat_npts
@@ -1008,9 +1021,19 @@ def scene_reconstruction(
                     stat_point = stat_points[select_inds]
 
                     N_pts = opt.dyn_npts
-                    dyn_colors = colors[(accum_error == 1) & (motion_error == 1), :]
-                    dyn_points = points[(accum_error == 1) & (motion_error == 1), :]
-                    dyn_coords_2d = coords_2d.reshape(-1, 2)[(accum_error == 1) & (motion_error == 1), :]
+                    dyn_mask = (accum_error == 1) & (motion_error == 1)
+                    if np.count_nonzero(dyn_mask) == 0:
+                        # Fallbacks for clips where the strict joint criterion finds no dynamic seeds.
+                        dyn_mask = motion_error == 1
+                    if np.count_nonzero(dyn_mask) == 0:
+                        dyn_mask = accum_error == 1
+                    if np.count_nonzero(dyn_mask) == 0:
+                        # Last resort: allow initialization from all pixels instead of crashing.
+                        dyn_mask = np.ones_like(accum_error, dtype=bool)
+
+                    dyn_colors = colors[dyn_mask, :]
+                    dyn_points = points[dyn_mask, :]
+                    dyn_coords_2d = coords_2d.reshape(-1, 2)[dyn_mask, :]
                     if dyn_colors.shape[0] < N_pts:
                         select_inds = random.choices(range(dyn_colors.shape[0]), k=N_pts)
                     else:
@@ -1024,13 +1047,14 @@ def scene_reconstruction(
             # compute dyn tracker
             tracklet = viewpoint_stack[0].target_tracks
             start_tracklet = tracklet[0]  # time = 0 (cannonical)
+            num_track_frames = tracklet.shape[0]
             dyn_tracklet_index = (
                 torch.square(torch.from_numpy(dyn_coord_2d[:, None]).cuda() - start_tracklet[None]).sum(-1).argmin(-1)
             )
             dyn_tracklet = torch.gather(
                 tracklet[None].expand(dyn_coord_2d.shape[0], -1, -1, -1),
                 2,
-                dyn_tracklet_index[:, None, None, None].expand(-1, 12, -1, 2),
+                dyn_tracklet_index[:, None, None, None].expand(-1, num_track_frames, -1, 2),
             ).squeeze(
                 2
             )  # N_dyn_pts, N_time, 2
@@ -1046,9 +1070,12 @@ def scene_reconstruction(
                 .permute(2, 0, 1)
             )  # N_pts, N_times, 3
 
+            consistency_ratio = float(getattr(opt, "dynamic_mask_consistency_ratio", 0.3))
+            min_consistent_frames = max(1, int(np.ceil(dyn_tracjectory.shape[1] * consistency_ratio)))
+
             # if viewpoint_stack[0].instance_mask is not None:
             if opt.use_instance_mask:
-                total_mask_all_t = None
+                total_mask_votes = None
                 total_mask_list = []
                 for i in range(dyn_tracjectory.shape[1]):
                     current_traj = dyn_tracjectory[:, i, :]
@@ -1085,14 +1112,12 @@ def scene_reconstruction(
                             else:
                                 total_mask = total_mask | instance_and_depth_mask
 
+                    if total_mask is None:
+                        total_mask = torch.zeros(dyn_tracjectory.shape[0], dtype=torch.bool, device=dyn_tracjectory.device)
                     total_mask_list.append(total_mask)
-
-                    if total_mask_all_t is None:
-                        total_mask_all_t = total_mask
-                    else:
-                        total_mask_all_t = total_mask_all_t & total_mask
+                    total_mask_votes = total_mask.int() if total_mask_votes is None else total_mask_votes + total_mask.int()
             else:
-                total_mask_all_t = None
+                total_mask_votes = None
                 total_mask_list = []
                 for i in range(dyn_tracjectory.shape[1]):
                     current_traj = dyn_tracjectory[:, i, :]
@@ -1102,7 +1127,9 @@ def scene_reconstruction(
                     pixel_coords = torch.stack([X_norm, Y_norm], dim=-1)
                     src_pixel_coords = pixel_coords[None, None]
 
-                    curr_mask = viewpoint_stack[i].mask[None]
+                    curr_mask = _motion_mask_for_view(
+                        viewpoint_stack[i], use_dynamic_mask=getattr(opt, "use_dynamic_mask", False)
+                    )[None]
                     erode_mask = kornia.morphology.erosion(curr_mask, kernel=torch.ones(5, 5).cuda())
                     
                     # breakpoint()
@@ -1115,16 +1142,29 @@ def scene_reconstruction(
                         .squeeze()
                         .bool()
                     )
-                    total_mask_list.append(projected_mask > 0)
-                    if total_mask_all_t is None:
-                        total_mask_all_t = projected_mask > 0
-                    else:
-                        total_mask_all_t = total_mask_all_t & (projected_mask > 0)
+                    current_support = projected_mask > 0
+                    total_mask_list.append(current_support)
+                    total_mask_votes = (
+                        current_support.int() if total_mask_votes is None else total_mask_votes + current_support.int()
+                    )
 
-            new_dyn_tracjectory = dyn_tracjectory[total_mask_all_t]
-            new_dyn_color = dyn_color[total_mask_all_t.cpu().numpy()]
-            new_dyn_point = dyn_point[total_mask_all_t.cpu().numpy()]
-            new_dyn_time = dyn_time[total_mask_all_t.cpu().numpy()]
+            total_mask_all_t = None
+            if total_mask_votes is not None:
+                total_mask_all_t = total_mask_votes >= min_consistent_frames
+
+            if total_mask_all_t is None or not bool(total_mask_all_t.any()):
+                # If no dynamic point survives the temporal consistency threshold,
+                # keep the pre-filtered dynamic set rather than initializing zero Gaussians.
+                new_dyn_tracjectory = dyn_tracjectory
+                new_dyn_color = dyn_color
+                new_dyn_point = dyn_point
+                new_dyn_time = dyn_time
+            else:
+                keep_mask_np = total_mask_all_t.cpu().numpy()
+                new_dyn_tracjectory = dyn_tracjectory[total_mask_all_t]
+                new_dyn_color = dyn_color[keep_mask_np]
+                new_dyn_point = dyn_point[keep_mask_np]
+                new_dyn_time = dyn_time[keep_mask_np]
 
             stat_pc = BasicPointCloud(colors=stat_color, points=stat_point, normals=None, times=stat_time)
             dyn_pc = BasicPointCloud(colors=new_dyn_color, points=new_dyn_point, normals=None, times=new_dyn_time)

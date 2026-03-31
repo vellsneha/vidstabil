@@ -39,7 +39,12 @@ if __name__ == "__main__":
     parser.add_argument("--image_dir", type=str, required=True, help="image dir")
     parser.add_argument("--out_dir", type=str, required=True, help="out dir")
     parser.add_argument("--depth_type", type=str, help="depth type disp or depth", default="depth")  
-    parser.add_argument("--depth_model", type=str, help="unidepth model", default="v2old")
+    parser.add_argument(
+        "--depth_model",
+        type=str,
+        help="unidepth model (v2 recommended; v2old may require xformers)",
+        default="v2",
+    )
     args = parser.parse_args()
     
     print("Torch version:", torch.__version__)
@@ -56,18 +61,30 @@ if __name__ == "__main__":
         name = f"unidepth-{args.depth_model}-vit{type_}14"
         if args.depth_model == "v2":
             model = UniDepthV2.from_pretrained(f"lpiccinelli/{name}")
-            # set resolution level (only V2)
-            # model.resolution_level = 9
-
-            # set interpolation mode (only V2)
             model.interpolation_mode = "bilinear"
         elif args.depth_model == "v2old":
-            model = UniDepthV2old.from_pretrained(f"lpiccinelli/{name}")
+            try:
+                model = UniDepthV2old.from_pretrained(f"lpiccinelli/{name}")
+            except Exception as e:
+                raise
+        else:
+            raise ValueError("--depth_model must be one of: v2, v2old")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model.to(device).eval()
 
-        gen_depth(model, args)
+        try:
+            gen_depth(model, args)
+        except NotImplementedError as e:
+            msg = str(e)
+            if "NystromAttention" in msg or "xformers" in msg:
+                raise SystemExit(
+                    "UniDepth depth inference failed because xformers/NystromAttention is unavailable.\n"
+                    "Fix options:\n"
+                    "  - Use UniDepth v2: pass --depth_model v2 (recommended)\n"
+                    "  - Or install xformers compatible with your CUDA/PyTorch\n"
+                ) from e
+            raise
     else:
         raise ValueError("depth_type must be either 'disp' or 'depth'")
 
