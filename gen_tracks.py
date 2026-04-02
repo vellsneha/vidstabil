@@ -29,7 +29,10 @@ def read_video(folder_path):
 
 def read_mask(folder_path):
     frame_paths = sorted(glob.glob(os.path.join(folder_path, "*")))
-    video = np.concatenate([np.array(Image.open(frame_path))[None, None] for frame_path in frame_paths], axis=1)
+    video = np.concatenate(
+        [np.array(Image.open(frame_path))[None, None, None] for frame_path in frame_paths],
+        axis=1,
+    )
     video = torch.from_numpy(video).float()
     return video
 

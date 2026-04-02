@@ -8,13 +8,13 @@ Verifies Step 1.3 — two-stage training loop — given that Steps 1.1
 and 1.2 are already complete.
 
 Architecture assumptions (from Steps 1.1 + 1.2):
-  - train_static_core.py is the active training file
+  - train_exp.py is the active training file
   - cam_spline (CameraSpline) is already added to the optimizer
   - Loss is already L1 + DSSIM photometric
   - Renderer: gaussian_renderer.render_static
 
 Checks:
-  1.  STEP1.3 comments present in train_static_core.py
+  1.  STEP1.3 comments present in train_exp.py
   2.  Spline parameters frozen (requires_grad=False) at init
   3.  Stage transition block present at iteration == 2000
   4.  Spline unfreeze (requires_grad_(True)) present in source
@@ -69,7 +69,7 @@ except ImportError:
 
 sys.path.insert(0, os.getcwd())
 
-TRAIN_FILE  = "train_static_core.py"
+TRAIN_FILE  = "train_exp.py"
 SPLINE_FILE = "scene/camera_spline.py"
 
 # ── load source ───────────────────────────────────────────────────────────────
@@ -87,11 +87,11 @@ if os.path.exists(SPLINE_FILE):
     with open(SPLINE_FILE) as f:
         spline_src = f.read()
 
-print("\n── Static analysis of train_static_core.py ──────────────────────────\n")
+print("\n── Static analysis of train_exp.py ──────────────────────────\n")
 
 # ── 1. STEP1.3 comments present ───────────────────────────────────────────────
 count_13 = train_src.count("# STEP1.3")
-check("# STEP1.3 comments present in train_static_core.py",
+check("# STEP1.3 comments present in train_exp.py",
       count_13 > 0, f"found {count_13} occurrence(s)")
 
 # ── 2. Spline frozen at init (requires_grad_(False)) ─────────────────────────
@@ -210,7 +210,7 @@ if spline_src is not None:
     check("camera_spline.py has no STEP1.3 modifications (should not be touched)",
           count_13_spline == 0,
           f"found {count_13_spline} STEP1.3 marks — Step 1.3 should only touch "
-          f"train_static_core.py")
+          f"train_exp.py")
 else:
     warn("camera_spline.py not found — skipping check 12")
 

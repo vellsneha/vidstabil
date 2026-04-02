@@ -190,7 +190,7 @@ python verify-2.2.py
 
 | File | Change |
 |------|--------|
-| `train_static_core.py` | `if iteration % 2 == 0` guard on `pose_optimizer.step()` (single-scene path + `_train_chunked`); stage-gate print; frequency confirmation comments |
+| `train_exp.py` | `if iteration % 2 == 0` guard on `pose_optimizer.step()` (single-scene path + `_train_chunked`); stage-gate print; frequency confirmation comments |
 | `verify-2.2.py` | Removed dead variable-width lookbehind; widened `{0,500}` → `{0,2000}` / `{0,3000}` for jitter / dilated frequency patterns |
 
 **Not touched:** `scene/camera_spline.py`, all `utils/` modules, `train_entrypoint.py`.
@@ -200,7 +200,7 @@ python verify-2.2.py
 ## How to run
 
 ```bash
-python train_static_core.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
+python train_exp.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
 python verify-2.2.py   # 22/22
 ```
 
@@ -225,5 +225,5 @@ Phase 2 (Steps 2.1 + 2.2) is complete. Ready for Phase 3 (dynamic masking).
 
 | Date | Files | Summary |
 |------|-------|---------|
-| 2026-03-26 | `train_static_core.py` | Asymmetric spline stepping: `if iteration % 2 == 0` / `if local_iter % 2 == 0` guards; stage-gate print update; frequency confirmation comments. |
+| 2026-03-26 | `train_exp.py` | Asymmetric spline stepping: `if iteration % 2 == 0` / `if local_iter % 2 == 0` guards; stage-gate print update; frequency confirmation comments. |
 | 2026-03-26 | `verify-2.2.py` | Removed variable-width lookbehind (`re.error` on Py 3.9); widened `{0,500}` → `{0,2000}` / `{0,3000}` for jitter / dilated patterns. |

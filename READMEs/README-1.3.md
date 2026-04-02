@@ -9,7 +9,7 @@ Splits training into a **warm-up stage** (iterations 0–1999) and a **main stag
 
 ## What Was Done
 
-All changes are in `train_static_core.py` only. `scene/camera_spline.py` is untouched.
+All changes are in `train_exp.py` only. `scene/camera_spline.py` is untouched.
 
 ### 1) Spline frozen at start (warm-up stage)
 
@@ -151,7 +151,7 @@ python verify-1.3.py
 
 | File | Change |
 |---|---|
-| `train_static_core.py` | All Step 1.3 changes (freeze, counter, gate, loss, stub, logging) |
+| `train_exp.py` | All Step 1.3 changes (freeze, counter, gate, loss, stub, logging) |
 | `scene/camera_spline.py` | **Not touched** |
 
 ---

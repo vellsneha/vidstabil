@@ -38,6 +38,24 @@ class CameraSpline(nn.Module):  # STEP1.2
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
+    def _safe_normalize_quat(self, q: torch.Tensor) -> torch.Tensor:
+        """Normalize quaternion robustly; fall back to identity if norm is invalid."""
+        q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
+        norm = torch.linalg.norm(q)
+        if (not torch.isfinite(norm)) or norm.item() < 1e-8:
+            ident = torch.zeros_like(q)
+            ident[0] = 1.0
+            return ident
+        return q / norm
+
+    def normalize_ctrl_quats_(self) -> None:
+        """Project control quaternions back onto S^3 after optimizer updates."""
+        with torch.no_grad():
+            qs = []
+            for q in self.ctrl_quats:
+                qs.append(self._safe_normalize_quat(q))
+            self.ctrl_quats.copy_(torch.stack(qs, dim=0))
+
     def _slerp(  # STEP1.2
         self,
         q0: torch.Tensor,  # STEP1.2
@@ -169,17 +187,17 @@ class CameraSpline(nn.Module):  # STEP1.2
         T_out = h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1  # STEP1.2
 
         # ---- Rotation: Squad (two nested Slerps) ---- #  # STEP1.2
-        q_i = self.ctrl_quats[i] / self.ctrl_quats[i].norm()  # STEP1.2
-        q_i1 = self.ctrl_quats[i + 1] / self.ctrl_quats[i + 1].norm()  # STEP1.2
+        q_i = self._safe_normalize_quat(self.ctrl_quats[i])  # STEP1.2
+        q_i1 = self._safe_normalize_quat(self.ctrl_quats[i + 1])  # STEP1.2
         q_im1_idx = max(0, i - 1)  # STEP1.2
         q_i2_idx = min(self.K - 1, i + 2)  # STEP1.2
-        q_im1 = self.ctrl_quats[q_im1_idx] / self.ctrl_quats[q_im1_idx].norm()  # STEP1.2
-        q_i2 = self.ctrl_quats[q_i2_idx] / self.ctrl_quats[q_i2_idx].norm()  # STEP1.2
+        q_im1 = self._safe_normalize_quat(self.ctrl_quats[q_im1_idx])  # STEP1.2
+        q_i2 = self._safe_normalize_quat(self.ctrl_quats[q_i2_idx])  # STEP1.2
         slerp_main = self._slerp(q_i, q_i1, u)  # STEP1.2
         slerp_aux = self._slerp(q_im1, q_i2, u)  # STEP1.2
         u_squad = 2.0 * u * (1.0 - u)  # STEP1.2
         q_out = self._slerp(slerp_main, slerp_aux, u_squad)  # STEP1.2
-        q_out = q_out / q_out.norm()  # STEP1.2
+        q_out = self._safe_normalize_quat(q_out)  # STEP1.2
 
         R_out = self._quat_to_matrix(q_out)  # STEP1.2
         return R_out, T_out  # STEP1.2

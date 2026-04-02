@@ -425,7 +425,7 @@ else:
         print(f"       Current: every {JITTER_INTERVAL} iters")
         next_interval = JITTER_INTERVAL * 2
         print(f"       Try:     every {next_interval} iters")
-        print(f"       In train_static_core.py, find:")
+        print(f"       In train_exp.py, find:")
         print(f"         if iteration % {JITTER_INTERVAL} == 0:")
         print(f"       Change to:")
         print(f"         if iteration % {next_interval} == 0:  # STEP2.4")

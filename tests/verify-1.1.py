@@ -16,7 +16,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parent
-TRAIN_FILE = ROOT / "train_static_core.py"
+TRAIN_FILE = ROOT / "train_exp.py"
 README_FILE = ROOT / "README_STATIC_CORE.md"
 ENTRYPOINT_FILE = ROOT / "train_entrypoint.py"
 PREFLIGHT_FILE = ROOT / "preflight_gpu.py"
@@ -33,7 +33,7 @@ def require(condition, ok_msg, fail_msg):
 def main():
     passed = True
 
-    passed &= require(TRAIN_FILE.exists(), "Found train_static_core.py", "Missing train_static_core.py")
+    passed &= require(TRAIN_FILE.exists(), "Found train_exp.py", "Missing train_exp.py")
     passed &= require(README_FILE.exists(), "Found README_STATIC_CORE.md", "Missing README_STATIC_CORE.md")
     passed &= require(ENTRYPOINT_FILE.exists(), "Found train_entrypoint.py", "Missing train_entrypoint.py")
     passed &= require(PREFLIGHT_FILE.exists(), "Found preflight_gpu.py", "Missing preflight_gpu.py")
@@ -85,12 +85,12 @@ def main():
     passed &= require(
         not has_forbidden,
         "No spline trajectory dynamics calls in static-core training path",
-        "Found spline/dynamic calls in train_static_core.py",
+        "Found spline/dynamic calls in train_exp.py",
     )
 
     # 6) Isolation gate: default must dispatch to static-core, legacy only behind explicit flag.
     entry_code = ENTRYPOINT_FILE.read_text(encoding="utf-8")
-    has_gate = "--legacy-dynamic" in entry_code and '("train.py" if args.legacy_dynamic else "train_static_core.py")' in entry_code
+    has_gate = "--legacy-dynamic" in entry_code and '("train.py" if args.legacy_dynamic else "train_exp.py")' in entry_code
     passed &= require(
         has_gate,
         "Legacy dynamics are isolated behind --legacy-dynamic gate",

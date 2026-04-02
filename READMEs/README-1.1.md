@@ -13,7 +13,7 @@ This file tracks every step completed to follow the requested scope:
 
 ### 1) Added a static-core training entrypoint
 
-- Created `train_static_core.py`.
+- Created `train_exp.py`.
 - This script is now the simplified path that avoids spline trajectory modeling.
 
 ### 2) Preserved 3DGS scene representation
@@ -61,7 +61,7 @@ This file tracks every step completed to follow the requested scope:
 ### 9) Isolated dynamic spline stack behind an explicit legacy switch
 
 - Added `train_entrypoint.py` to isolate runtime paths:
-  - Default mode runs `train_static_core.py`.
+  - Default mode runs `train_exp.py`.
   - Legacy dynamic mode runs original `train.py` only when `--legacy-dynamic` is set.
 - This keeps spline dynamics available but quarantined from the default workflow.
 
@@ -103,7 +103,7 @@ python train_entrypoint.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_static_c
 python train_entrypoint.py --skip-gpu-preflight -s data/nvidia_rodynrf/<SCENE>/ --expname my_static_core
 
 # Equivalent direct static call (no automatic preflight — run preflight_gpu.py first)
-python preflight_gpu.py && python train_static_core.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_static_core
+python preflight_gpu.py && python train_exp.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_static_core
 ```
 
 Legacy dynamic (isolated):

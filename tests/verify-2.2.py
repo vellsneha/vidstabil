@@ -13,7 +13,7 @@ Step 2.2 adds only:
   - Same in _train_chunked (local_iter % 2 == 0)
 
 Checks:
-  Static (train_static_core.py):
+  Static (train_exp.py):
   1.  STEP2.2 comments present
   2.  pose_optimizer.step() is conditional (iteration % 2 == 0)
   3.  Gaussian optimizer.step() is NOT conditional (every iteration)
@@ -59,7 +59,7 @@ def warn(name, detail=""):
     if detail:
         print(f"       {detail}")
 
-TRAIN_FILE  = "train_static_core.py"
+TRAIN_FILE  = "train_exp.py"
 SPLINE_FILE = "scene/camera_spline.py"
 
 def load(path):
@@ -75,11 +75,11 @@ if train_src is None:
     print(f"{FAIL} {TRAIN_FILE} not found — run from repo root")
     sys.exit(1)
 
-print("\n── Static analysis of train_static_core.py ──────────────────────────\n")
+print("\n── Static analysis of train_exp.py ──────────────────────────\n")
 
 # ── 1. STEP2.2 comments ───────────────────────────────────────────────────────
 n22 = train_src.count("# STEP2.2")
-check("# STEP2.2 comments present in train_static_core.py",
+check("# STEP2.2 comments present in train_exp.py",
       n22 > 0, f"found {n22} occurrence(s)")
 
 # ── 2. pose_optimizer.step() is conditional (iteration % 2 == 0) ─────────────

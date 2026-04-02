@@ -1,7 +1,7 @@
 """
 verify_step1_4.py
 -----------------
-Run from the repository root (same directory as train_static_core.py):
+Run from the repository root (same directory as train_exp.py):
 
     python verify-1.4.py
     python verify-1.4.py --strict   # exit non-zero unless every term passes
@@ -11,7 +11,7 @@ As you define each term (one by one), tighten the regex lists in TERM_SPECS
 below so this script fully encodes the spec.
 
 Convention (recommended for reliable checks):
-  - Use distinct Python names in train_static_core.py, e.g. loss_smooth,
+  - Use distinct Python names in train_exp.py, e.g. loss_smooth,
     loss_jitter, loss_fov, loss_dilated (or keep names aligned with your math).
   - Tag the block with # STEP1.4 ... so static checks stay unambiguous.
 
@@ -32,7 +32,7 @@ FAIL = "\033[91m[FAIL]\033[0m"
 WARN = "\033[93m[WARN]\033[0m"
 INFO = "\033[94m[INFO]\033[0m"
 
-TRAIN_FILE = "train_static_core.py"
+TRAIN_FILE = "train_exp.py"
 SPLINE_FILE = "scene/camera_spline.py"
 
 # If you move pure loss computations here, runtime checks will import it.
@@ -220,7 +220,7 @@ def main() -> None:
         results.append((name, ok))
 
     ok, d = check_global_step14(src)
-    r("Global: STEP1.4 documentation in train_static_core.py", ok, d)
+    r("Global: STEP1.4 documentation in train_exp.py", ok, d)
 
     ok, d = check_main_stage_gate(src)
     r("Global: stability block gated (iteration >= 2000)", ok, d)

@@ -223,7 +223,7 @@ python verify-2.1.py
 
 | File | Change |
 |------|--------|
-| `train_static_core.py` | `build_chunk_indices`, `_train_chunked`, constants, `use_chunked` branch, `else`-wrap of existing loop |
+| `train_exp.py` | `build_chunk_indices`, `_train_chunked`, constants, `use_chunked` branch, `else`-wrap of existing loop |
 | `train_entrypoint.py` | One `# STEP2.1` comment |
 
 **Not touched:** `scene/camera_spline.py`, `scene/gaussian_model.py`,
@@ -235,10 +235,10 @@ python verify-2.1.py
 
 ```bash
 # Short video (≤150 frames) — original single-scene path
-python train_static_core.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
+python train_exp.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
 
 # Long video (>150 frames) — chunked path fires automatically
-python train_static_core.py -s data/long_video/ --expname long_run
+python train_exp.py -s data/long_video/ --expname long_run
 ```
 
 ---
@@ -247,7 +247,7 @@ python train_static_core.py -s data/long_video/ --expname long_run
 
 ### 2026-03-26 — Step 2.1 implemented
 
-- New top-level functions `build_chunk_indices` and `_train_chunked` in `train_static_core.py`.
+- New top-level functions `build_chunk_indices` and `_train_chunked` in `train_exp.py`.
 - `CHUNK_THRESHOLD=150`, `CHUNK_SIZE=70`, `OVERLAP=20` constants.
 - `use_chunked` branch; existing loop moved into `else`.
 - One comment in `train_entrypoint.py`.
@@ -259,4 +259,4 @@ python train_static_core.py -s data/long_video/ --expname long_run
 
 | Date | Files | Summary |
 |------|-------|---------|
-| 2026-03-26 | `train_static_core.py`, `train_entrypoint.py` | Step 2.1: `build_chunk_indices`, `_train_chunked`, constants, `use_chunked` branch, `else`-wrap. |
+| 2026-03-26 | `train_exp.py`, `train_entrypoint.py` | Step 2.1: `build_chunk_indices`, `_train_chunked`, constants, `use_chunked` branch, `else`-wrap. |

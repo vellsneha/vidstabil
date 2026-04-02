@@ -6,9 +6,10 @@ from random import randint
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from arguments import ModelHiddenParams, ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render_static
-from scene import GaussianModel, Scene
+from scene import GaussianModel, Scene, deformation
 from scene.camera_spline import CameraSpline  # STEP1.2
 from scene.gaussian_model import controlgaussians  # STEP2.3
 from tqdm import tqdm
@@ -31,13 +32,46 @@ def _stability_loss_frame_indices(n_frames: int, max_samples: int, device: torch
     return torch.randperm(n_frames, device=device)[:m]
 
 
+def _pose_translation_stats(Ts: torch.Tensor):
+    Ts = Ts.detach().cpu().float()
+    step = torch.linalg.norm(Ts[1:] - Ts[:-1], dim=1) if Ts.shape[0] >= 2 else torch.zeros(0)
+    return {
+        "std": Ts.std(dim=0).numpy(),
+        "mean_step": float(step.mean()) if step.numel() else 0.0,
+        "max_step": float(step.max()) if step.numel() else 0.0,
+    }
+
+
+def _pose_rotation_stats(Rs: torch.Tensor):
+    Rs = Rs.detach().cpu().float()
+    step = torch.linalg.norm(Rs[1:] - Rs[:-1], dim=(1, 2)) if Rs.shape[0] >= 2 else torch.zeros(0)
+    return {
+        "first_row_start": Rs[0, 0].numpy(),
+        "first_row_end": Rs[-1, 0].numpy(),
+        "mean_step": float(step.mean()) if step.numel() else 0.0,
+        "max_step": float(step.max()) if step.numel() else 0.0,
+    }
+
+
+def _log_pose_stats(tag: str, Rs: torch.Tensor, Ts: torch.Tensor):
+    t_stats = _pose_translation_stats(Ts)
+    r_stats = _pose_rotation_stats(Rs)
+    print(
+        f"[pose:{tag}] T_std={t_stats['std']} "
+        f"T_mean_step={t_stats['mean_step']:.6f} T_max_step={t_stats['max_step']:.6f} "
+        f"R_mean_step={r_stats['mean_step']:.6f} R_max_step={r_stats['max_step']:.6f} "
+        f"R0_row0={r_stats['first_row_start']} Rn_row0={r_stats['first_row_end']}"
+    )
+
+
 def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  # STEP1.2 STEP1.4
     """Apply `cam_spline` pose for integer frame index (shared by main render & jitter)."""  # STEP1.4
     R, T = cam_spline.get_pose(float(frame_idx))  # STEP1.2
     # Guard against occasional invalid/ill-conditioned pose outputs.
-    if (not torch.isfinite(R).all()) or (not torch.isfinite(T).all()):
-        R = torch.eye(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+    if not torch.isfinite(T).all():
         T = torch.zeros(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
+    if (not torch.isfinite(R).all()):
+        R = torch.eye(3, device=cam_spline.ctrl_trans.device, dtype=cam_spline.ctrl_trans.dtype)
     else:
         # Project to nearest valid rotation matrix (SO(3)) for numerical stability.
         U, _, Vh = torch.linalg.svd(R)
@@ -46,6 +80,9 @@ def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  #
             U[:, -1] *= -1
             R = U @ Vh
 
+    # Keep Camera fields in sync; ray construction uses `self.R`/`self.T`.
+    viewpoint_cam.R = R
+    viewpoint_cam.T = T
     focal_val = float(np.asarray(focal).reshape(-1)[0])  # focal may come as numpy array
     viewpoint_cam.focal = focal_val  # keep Camera fields consistent with intrinsics
     viewpoint_cam.FoVy = focal2fov(focal_val, viewpoint_cam.image_height)  # STEP1.2
@@ -72,6 +109,56 @@ def set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, frame_idx):  #
     K[1, 2] = float(viewpoint_cam.image_height) * 0.5
     K[2, 2] = 1.0
     viewpoint_cam.K = K
+    pixels = viewpoint_cam.get_pixels_torch(
+        viewpoint_cam.metadata.image_size_x,
+        viewpoint_cam.metadata.image_size_y,
+        use_center=True,
+    )
+    viewdirs = viewpoint_cam.pixels_to_viewdirs_torch(pixels)
+    cam_origin, _ = torch.broadcast_tensors(viewpoint_cam.camera_center, viewdirs)
+    viewpoint_cam.cam_ray = torch.cat((cam_origin, viewdirs), dim=-1).permute(2, 0, 1).unsqueeze(0)
+
+
+def set_camera_pose_from_posenet(viewpoint_cam, pose_net, focal):  # STEP1.3 warm-up
+    """Apply the legacy pose-network prediction for one camera while training warm-up poses."""
+    time_in = torch.tensor(viewpoint_cam.time, device="cuda").float().view(1, 1)
+    depth_in = viewpoint_cam.depth[None].cuda().view(-1, 1)
+    pred_R, pred_T, _ = pose_net(time_in, depth=depth_in)
+    viewpoint_cam.update_cam(torch.transpose(pred_R[0], 1, 0), pred_T[0], None, None, focal)
+
+
+def _collect_posenet_poses(train_cams, pose_net):
+    """Export per-frame warm-up poses from the pose network for spline initialization."""
+    Rs, Ts = [], []
+    with torch.no_grad():
+        for cam in train_cams:
+            depth_in = cam.depth[None].cuda().view(-1, 1)
+            time_in = torch.tensor(cam.time, device="cuda").float().view(1, 1)
+            pred_R, pred_T, _ = pose_net(time_in, depth=depth_in)
+            Rs.append(torch.transpose(pred_R[0], 1, 0).detach().cpu())
+            Ts.append(pred_T[0].detach().cpu())
+    return torch.stack(Rs), torch.stack(Ts)
+
+
+def _recenter_poses_to_first_frame(Rs: torch.Tensor, Ts: torch.Tensor):
+    """Convert absolute warm-up poses into a trajectory relative to frame 0."""
+    device = Rs.device
+    dtype = Rs.dtype
+    n = Rs.shape[0]
+
+    def _w2c_from_rt(R, T):
+        w2c = torch.eye(4, device=device, dtype=dtype)
+        w2c[:3, :3] = R.transpose(0, 1)
+        w2c[:3, 3] = T
+        return w2c
+
+    w2c0_inv = torch.linalg.inv(_w2c_from_rt(Rs[0], Ts[0]))
+    rel_Rs, rel_Ts = [], []
+    for i in range(n):
+        rel = _w2c_from_rt(Rs[i], Ts[i]) @ w2c0_inv
+        rel_Rs.append(rel[:3, :3].transpose(0, 1))
+        rel_Ts.append(rel[:3, 3])
+    return torch.stack(rel_Rs), torch.stack(rel_Ts)
 
 
 def world_to_camera_points(xyz_world, world_view_transform):  # STEP1.4 L_dilated
@@ -103,6 +190,112 @@ def build_chunk_indices(total_frames, chunk_size, overlap):  # STEP2.1
     return chunks  # STEP2.1
 
 
+def _camera_w2c_3x4(viewpoint_cam):
+    """Current camera extrinsics as [1, 3, 4] for deformation warps."""
+    return viewpoint_cam.world_view_transform.transpose(0, 1)[:3, :].unsqueeze(0)
+
+
+def _sample_warped_track_points(grid_hw2, query_tracks_xy, image_height, image_width):
+    """Sample a warp grid at track locations; returns normalized coordinates [N, 2]."""
+    if query_tracks_xy is None or query_tracks_xy.numel() == 0:
+        return None
+
+    q = query_tracks_xy.to(device=grid_hw2.device, dtype=grid_hw2.dtype).clone()
+    q[..., 0] = (q[..., 0] / float(image_width)) * 2.0 - 1.0
+    q[..., 1] = (q[..., 1] / float(image_height)) * 2.0 - 1.0
+    sampled = F.grid_sample(
+        grid_hw2.permute(2, 0, 1).unsqueeze(0),
+        q.view(1, 1, -1, 2),
+        align_corners=True,
+        mode="bilinear",
+    )
+    return sampled.squeeze(0).squeeze(1).transpose(0, 1)
+
+
+def _track_alignment_loss(tracklet, current_uid, ref_uid, warp_grid, image_height, image_width):
+    """MSE between warped current-frame tracks and reference-frame tracks."""
+    if tracklet is None or tracklet.numel() == 0:
+        return None
+    if current_uid >= tracklet.shape[0] or ref_uid >= tracklet.shape[0]:
+        return None
+
+    current_track = tracklet[current_uid]
+    ref_track = tracklet[ref_uid].to(device=warp_grid.device, dtype=warp_grid.dtype).clone()
+    ref_track[..., 0] = (ref_track[..., 0] / float(image_width)) * 2.0 - 1.0
+    ref_track[..., 1] = (ref_track[..., 1] / float(image_height)) * 2.0 - 1.0
+
+    warped_track = _sample_warped_track_points(
+        warp_grid, current_track, image_height=image_height, image_width=image_width
+    )
+    if warped_track is None:
+        return None
+
+    valid = (
+        (ref_track[..., 0] >= -1.0)
+        & (ref_track[..., 0] <= 1.0)
+        & (ref_track[..., 1] >= -1.0)
+        & (ref_track[..., 1] <= 1.0)
+        & torch.isfinite(ref_track).all(dim=-1)
+        & torch.isfinite(warped_track).all(dim=-1)
+    )
+    if not torch.any(valid):
+        return None
+    return ((warped_track[valid] - ref_track[valid]) ** 2).mean()
+
+
+def _get_global_static_tracklet(train_cams):
+    """Return the shared static-track tensor stored on any training camera."""
+    for cam in train_cams:
+        tracklet = getattr(cam, "target_tracks_static", None)
+        if tracklet is not None and tracklet.numel() > 0:
+            return tracklet
+    return None
+
+
+def _static_track_loss_for_view(viewpoint_cam, ref_cams, cam_spline, focal_np, tracklet=None):
+    """
+    Camera-only track supervision from BootscoTracker static tracks.
+    Dynamic tracks are still loaded by the dataset for parity with train.py, but
+    only static tracks are geometrically valid for this camera-warp loss.
+    """
+    if tracklet is None:
+        tracklet = getattr(viewpoint_cam, "target_tracks_static", None)
+    if tracklet is None or tracklet.numel() == 0 or not ref_cams:
+        return None
+
+    set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal_np, viewpoint_cam.uid)
+    depth = viewpoint_cam.depth.unsqueeze(0).to(viewpoint_cam.K.device)
+    intrinsics = viewpoint_cam.K.unsqueeze(0)
+    intrinsics_inv = torch.inverse(intrinsics)
+    loss_terms = []
+
+    for ref_cam in ref_cams:
+        set_camera_pose_from_spline(ref_cam, cam_spline, focal_np, ref_cam.uid)
+        _, warp_grid = deformation.inverse_warp_rt1_rt2(
+            ref_cam.original_image.unsqueeze(0).to(depth.device),
+            depth,
+            _camera_w2c_3x4(viewpoint_cam).to(depth.device),
+            _camera_w2c_3x4(ref_cam).to(depth.device),
+            intrinsics,
+            intrinsics_inv,
+            ret_grid=True,
+        )
+        term = _track_alignment_loss(
+            tracklet,
+            viewpoint_cam.uid,
+            ref_cam.uid,
+            warp_grid[0],
+            image_height=viewpoint_cam.image_height,
+            image_width=viewpoint_cam.image_width,
+        )
+        if term is not None:
+            loss_terms.append(term)
+
+    if not loss_terms:
+        return None
+    return torch.stack(loss_terms).mean()
+
+
 def _train_chunked(  # STEP2.1
     chunk_list,         # STEP2.1 list of (c_start, c_end) tuples
     cam_spline,         # STEP2.1 global CameraSpline (shared, updated by all chunks)
@@ -113,18 +306,21 @@ def _train_chunked(  # STEP2.1
     opt,                # STEP2.1 OptimizationParams
     background,         # STEP2.1 background color tensor
     T_ref_fov,          # STEP2.1 frozen low-frequency translation reference [N, 3]
+    T_ref_anchor,       # learned warm-up translation trajectory [N, 3]
     model_path,         # STEP2.1 output directory for per-chunk checkpoints
     scene,              # STEP2.3 global Scene (provides cameras_extent for densification)
     max_gaussians,      # STEP2.3 hard cap on Gaussian count
+    static_tracklet=None,  # shared BootscoTracker static tracks for all chunk frames
     use_masked_photo=False,  # STEP3.1 masked L_photo when dynamic_mask_t present
 ):  # STEP2.1
     """Per-chunk windowed training for long videos (total_frames > CHUNK_THRESHOLD)."""  # STEP2.1
     lambda_dssim = 0.2  # STEP2.1
     w_smooth  = 1e-1    # STEP2.1
-    w_jitter  = 5e-1    # STEP2.1
+    w_jitter  = 1e-1    # STEP2.1 reduced to avoid over-driving camera motion
     w_fov     = 5e-2    # STEP2.1
+    w_anchor  = 1.0     # keep spline close to warm-up trajectory
     w_dilated = 1e-1    # STEP2.1
-    CHUNK_WARMUP = 500  # STEP2.1 — shorter warm-up per chunk
+    CHUNK_WARMUP = 500  # STEP2.1 — delay stability regularizers, but keep spline trainable
 
     global_iteration = 0  # STEP2.1 — cross-chunk iteration counter
     iters_per_chunk = opt.iterations // len(chunk_list)  # STEP2.1
@@ -146,10 +342,6 @@ def _train_chunked(  # STEP2.1
         # 4b. Warm-start from global scene skipped (GaussianModel has no clone);
         #     TODO: copy stat_gaussians state when a clone/copy utility is added.
 
-        # 4c. Freeze spline for this chunk's warm-up phase.
-        for p in cam_spline.parameters():  # STEP2.1
-            p.requires_grad_(False)        # STEP2.1 chunk warm-up
-
         # 4e. Per-chunk training loop.
         for local_iter in range(iters_per_chunk):  # STEP2.1
             global_iteration += 1  # STEP2.1
@@ -158,16 +350,14 @@ def _train_chunked(  # STEP2.1
             if local_iter % 1000 == 0 and local_iter > 2000:  # STEP2.1
                 chunk_gaussians.oneupSHdegree()  # STEP2.1
 
-            # Stage gate (chunk-local): unfreeze spline after CHUNK_WARMUP iters.
-            if local_iter == CHUNK_WARMUP:  # STEP2.1
-                for p in cam_spline.parameters():  # STEP2.1
-                    p.requires_grad_(True)          # STEP2.1 unfreeze spline for chunk
-                print(f"[STEP2.1] Chunk {chunk_idx}: spline unfrozen "  # STEP2.1
-                      f"at local_iter {local_iter}")                     # STEP2.1
-
             # Sample a camera from this chunk's frame range.
             viewpoint_cam = random.choice(chunk_cameras)  # STEP2.1
             cam_id = viewpoint_cam.uid  # STEP2.1 absolute frame index in [c_start, c_end)
+            ref_cams = []
+            if cam_id - 1 >= c_start:
+                ref_cams.append(all_train_cameras[cam_id - 1])
+            if cam_id + 1 < c_end:
+                ref_cams.append(all_train_cameras[cam_id + 1])
 
             gt_image = viewpoint_cam.original_image.cuda()  # STEP2.1
             focal = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()  # STEP2.1
@@ -192,6 +382,12 @@ def _train_chunked(  # STEP2.1
                 ssim_loss = ssim(pred_image, gt_image) if lambda_dssim != 0 else 0.0       # STEP2.1
                 loss = ll1 + lambda_dssim * (1.0 - ssim_loss)                              # STEP2.1
 
+            track_loss = _static_track_loss_for_view(
+                viewpoint_cam, ref_cams, cam_spline, focal, tracklet=static_tracklet
+            )
+            if track_loss is not None:
+                loss = loss + opt.w_track * track_loss
+
             # Stability losses — same terms, weights, and frequencies as single-scene
             # path; active after the chunk warm-up gate (local_iter >= CHUNK_WARMUP).
             if local_iter >= CHUNK_WARMUP:  # STEP2.1
@@ -214,6 +410,10 @@ def _train_chunked(  # STEP2.1
                 Tbar_s = T_ref_fov[idx].to(device=dev, dtype=dt)
                 loss_fov = ((Ts_now - Tbar_s) ** 2).sum(dim=-1).mean()
                 loss = loss + w_fov * loss_fov
+
+                T_anchor = T_ref_anchor[idx].to(device=dev, dtype=dt)
+                loss_anchor = ((Ts_now - T_anchor) ** 2).sum(dim=-1).mean()
+                loss = loss + w_anchor * loss_anchor
 
                 # L_jitter: pixel-diff or RAFT+Laplacian; expensive — every 10 iters.
                 if chunk_n_frames >= 2 and local_iter % 10 == 0:  # STEP2.1
@@ -298,6 +498,7 @@ def _train_chunked(  # STEP2.1
             chunk_optimizer.zero_grad(set_to_none=True)     # STEP2.1
             if local_iter % 2 == 0:                         # STEP2.2 — spline steps every 2nd iter
                 pose_optimizer.step()                        # STEP2.2
+                cam_spline.normalize_ctrl_quats_()           # keep spline rotations on S^3
                 pose_optimizer.zero_grad(set_to_none=True)  # STEP2.2
 
             # STEP2.3 — densification + hard Gaussian cap for this chunk
@@ -355,8 +556,9 @@ def train_static_core(dataset, hyper, opt):
     lambda_dssim = 0.2  # STEP1.3 L_photo weight for L1 + 0.2*L_SSIM
     # STEP1.4 tuned defaults (from spec slide): lambda1..lambda4
     w_smooth = 1e-1
-    w_jitter = 5e-1
+    w_jitter = 1e-1
     w_fov = 5e-2
+    w_anchor = 1.0
     w_dilated = 1e-1
 
     # STEP2.1 — chunked windowed path constants
@@ -374,7 +576,7 @@ def train_static_core(dataset, hyper, opt):
     pose_holder.create_pose_network(hyper, scene.getTrainCameras())
     stat_gaussians.training_setup(opt, stage="fine_static")
 
-    # Separate optimizer for pose network.
+    # Warm-up learns per-frame poses with the legacy pose net, then hands off to cam_spline.
     pose_params = list(pose_holder._posenet.get_mlp_parameters())
     pose_params += list(pose_holder._posenet.get_focal_parameters())
     pose_optimizer = torch.optim.Adam(pose_params, lr=opt.pose_lr_init, eps=1e-15)
@@ -383,6 +585,17 @@ def train_static_core(dataset, hyper, opt):
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     train_cams = [i for i in scene.getTrainCameras()]
+    has_dynamic_masks = sum(getattr(cam, "dynamic_mask_t", None) is not None for cam in train_cams)
+    static_tracklet = _get_global_static_tracklet(train_cams)
+    track_frames = sum(getattr(cam, "target_tracks_static", None) is not None for cam in train_cams)
+    has_static_tracks = static_tracklet is not None
+    has_dynamic_tracks = any(getattr(cam, "target_tracks", None) is not None for cam in train_cams)
+    print(
+        f"[data] dynamic_masks={has_dynamic_masks}/{len(train_cams)} frames "
+        f"| static_tracks={'yes' if has_static_tracks else 'no'} "
+        f"(stored_on={track_frames}/{len(train_cams)} cams) "
+        f"| dynamic_tracks={'yes' if has_dynamic_tracks else 'no'}"
+    )
 
     use_masked_photo = bool(getattr(dataset, "use_dynamic_mask", False))  # STEP3.1
 
@@ -407,11 +620,10 @@ def train_static_core(dataset, hyper, opt):
     with torch.no_grad():  # STEP1.4 L_fov — frozen low-frequency reference from initial translations
         # PERF confirmed — T_ref_fov computed once before loop
         T_ref_fov = frozen_low_frequency_translation_reference(_Ts_init.cuda().float())  # STEP1.4 [N,3] detached
+        T_ref_anchor = _Ts_init.cuda().float()
     pose_optimizer.add_param_group(  # STEP1.2
-        {"params": list(cam_spline.parameters()), "lr": opt.pose_lr_init}  # STEP1.2
+        {"params": [cam_spline.ctrl_trans], "lr": opt.pose_lr_init}  # STEP1.2
     )  # STEP1.2
-    for p in cam_spline.parameters():  # STEP1.3
-        p.requires_grad_(False)  # STEP1.3 warm-up: spline frozen
 
     # STEP2.1 — branch: long videos use chunked windowed path; short videos run
     # the original single-scene loop unchanged (else-branch below).
@@ -431,9 +643,11 @@ def train_static_core(dataset, hyper, opt):
             opt,                       # STEP2.1
             background,                # STEP2.1
             T_ref_fov,                 # STEP2.1
+            T_ref_anchor,              # STEP2.1
             args.model_path,           # STEP2.1
             scene,                     # STEP2.3
             MAX_GAUSSIANS,             # STEP2.3
+            static_tracklet=static_tracklet,
             use_masked_photo=use_masked_photo,  # STEP3.1
         )                              # STEP2.1
     else:  # STEP2.1 — short video, original single-scene path unchanged
@@ -452,10 +666,19 @@ def train_static_core(dataset, hyper, opt):
                 viewpoint_stack_ids = list(range(len(train_cams)))
             cam_id = viewpoint_stack_ids.pop(randint(0, len(viewpoint_stack_ids) - 1))
             viewpoint_cam = train_cams[cam_id]
+            ref_cams = []
+            if cam_id - 1 >= 0:
+                ref_cams.append(train_cams[cam_id - 1])
+            if cam_id + 1 < total_frames:
+                ref_cams.append(train_cams[cam_id + 1])
 
             gt_image = viewpoint_cam.original_image.cuda()
             focal = pose_holder._posenet.focal_bias.exp().detach().cpu().numpy()  # STEP1.2
-            set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, cam_id)  # STEP1.2
+
+            if iteration <= 2000:  # STEP1.3 warm-up with pose_network before spline handoff
+                set_camera_pose_from_posenet(viewpoint_cam, pose_holder._posenet, focal)
+            else:
+                set_camera_pose_from_spline(viewpoint_cam, cam_spline, focal, cam_id)  # STEP1.2
 
             render_pkg = render_static(
                 viewpoint_camera=viewpoint_cam,
@@ -477,15 +700,34 @@ def train_static_core(dataset, hyper, opt):
                 photo_loss = ll1 + lambda_dssim * (1.0 - ssim_loss)  # STEP1.3 L_photo = L1 + 0.2*L_SSIM
             loss = photo_loss  # STEP1.3
 
-            # STEP1.3 — stage gate
-            if iteration == 2000:  # STEP1.3
-                for p in cam_spline.parameters():  # STEP1.3
-                    p.requires_grad_(True)  # STEP1.3 unfreeze spline
-                print("[STEP1.3] Main stage: spline unfrozen at iteration 2000 "
-                      "| spline steps every 2nd iter (STEP2.2)")  # STEP2.2
+            track_loss = None
+            if iteration > 2000:
+                track_loss = _static_track_loss_for_view(
+                    viewpoint_cam, ref_cams, cam_spline, focal, tracklet=static_tracklet
+                )
+            if track_loss is not None:
+                loss = loss + opt.w_track * track_loss
+
+            if iteration == 1:  # STEP1.3
+                print("[STEP1.3] Warm-up uses pose_network through iteration 2000; spline handoff starts at 2001")
+
+            # STEP1.3 — initialize spline from the learned warm-up poses on the boundary
+            # between stages, before the first spline-driven forward pass.
+            if iteration == 2001:  # STEP1.3
+                Rs_warm, Ts_warm = _collect_posenet_poses(train_cams, pose_holder._posenet)
+                _log_pose_stats("warmup_raw", Rs_warm, Ts_warm)
+                Rs_warm, Ts_warm = _recenter_poses_to_first_frame(Rs_warm, Ts_warm)
+                _log_pose_stats("warmup_recentered", Rs_warm, Ts_warm)
+                cam_spline.initialize_from_poses(Rs_warm, Ts_warm)
+                cam_spline.ctrl_quats.requires_grad_(False)  # keep learned warm-up rotations fixed
+                with torch.no_grad():
+                    T_ref_fov = frozen_low_frequency_translation_reference(Ts_warm.cuda().float())
+                    T_ref_anchor = Ts_warm.cuda().float()
+                print("[STEP1.3] Spline initialized from learned pose_network trajectory at iteration 2001 | rotations frozen")
+                continue
 
             # STEP1.4 — stability losses (main stage; spline trainable)
-            if iteration >= 2000:  # STEP1.3
+            if iteration > 2000:  # STEP1.3
                 # STEP1.4 L_smooth / L_fov — subsampled Monte Carlo mean (same expectation as full (1/N) sum).
                 dev = cam_spline.ctrl_trans.device
                 dt = cam_spline.ctrl_trans.dtype
@@ -499,6 +741,10 @@ def train_static_core(dataset, hyper, opt):
                 Tbar_s = T_ref_fov[idx].to(device=dev, dtype=dt)
                 loss_fov = ((Ts_now - Tbar_s) ** 2).sum(dim=-1).mean()
                 loss = loss + w_fov * loss_fov
+
+                T_anchor = T_ref_anchor[idx].to(device=dev, dtype=dt)
+                loss_anchor = ((Ts_now - T_anchor) ** 2).sum(dim=-1).mean()
+                loss = loss + w_anchor * loss_anchor
 
                 # STEP1.4 L_jitter: || nabla^2 (I_{t+1}-I_t) ||_F (pixel diff); RAFT+Laplacian after iter 7000
                 # Expensive: only every 10 iterations.
@@ -580,6 +826,7 @@ def train_static_core(dataset, hyper, opt):
             stat_gaussians.optimizer.zero_grad(set_to_none=True)  # unchanged
             if iteration % 2 == 0:                               # STEP2.2 — spline steps every 2nd iter
                 pose_optimizer.step()                             # STEP2.2
+                cam_spline.normalize_ctrl_quats_()                # keep spline rotations on S^3
                 pose_optimizer.zero_grad(set_to_none=True)       # STEP2.2
 
             # STEP2.3 — densification + hard Gaussian cap
@@ -615,7 +862,7 @@ def train_static_core(dataset, hyper, opt):
 
             n_gauss = stat_gaussians.get_xyz.shape[0]  # STEP2.3
             current_psnr = psnr(pred_image, gt_image).detach().mean().item()
-            stage = "warmup" if iteration < 2000 else "main"  # STEP1.3
+            stage = "warmup" if iteration <= 2000 else "main"  # STEP1.3
             progress_bar.set_postfix(
                 {
                     "loss": f"{loss.detach().item():.6f}",  # STEP1.3
@@ -640,10 +887,15 @@ def train_static_core(dataset, hyper, opt):
         "static_core_final",  # RENDER_PREP
         "cam_spline.pth",  # RENDER_PREP
     )  # RENDER_PREP
+    with torch.no_grad():  # RENDER_PREP
+        ctrl_quats_safe = []
+        for q in cam_spline.ctrl_quats:
+            ctrl_quats_safe.append(cam_spline._safe_normalize_quat(q.detach()).cpu())
+        ctrl_quats_safe = torch.stack(ctrl_quats_safe, dim=0)
     torch.save(  # RENDER_PREP
         {  # RENDER_PREP
             "ctrl_trans": cam_spline.ctrl_trans.data.cpu(),  # RENDER_PREP
-            "ctrl_quats": cam_spline.ctrl_quats.data.cpu(),  # RENDER_PREP
+            "ctrl_quats": ctrl_quats_safe,  # RENDER_PREP
             "N": cam_spline.N,  # RENDER_PREP
             "K": cam_spline.K,  # RENDER_PREP
         },  # RENDER_PREP
@@ -654,7 +906,9 @@ def train_static_core(dataset, hyper, opt):
     # Write pose trajectory for quick sanity checks.
     trajectory = []
     for cam in train_cams:
-        gt_Rt = getWorld2View2(cam.R, cam.T, cam.trans, cam.scale)
+        cam_R = cam.R.detach().cpu().numpy() if torch.is_tensor(cam.R) else cam.R
+        cam_T = cam.T.detach().cpu().numpy() if torch.is_tensor(cam.T) else cam.T
+        gt_Rt = getWorld2View2(cam_R, cam_T, cam.trans, cam.scale)
         trajectory.append(np.linalg.inv(gt_Rt))
     np.save(os.path.join(point_cloud_path, "train_cam_c2w_gt.npy"), np.stack(trajectory, axis=0))
 
@@ -683,10 +937,13 @@ def train_static_core(dataset, hyper, opt):
             os.path.join(point_cloud_path, "train_cam_c2w_spline.npy"),
             np.stack(learned_c2w, axis=0),
         )
+        learned_Rs = torch.from_numpy(np.stack([c[:3, :3] for c in learned_c2w], axis=0))
+        learned_Ts = torch.from_numpy(np.stack([c[:3, 3] for c in learned_c2w], axis=0))
+        _log_pose_stats("spline_export_c2w", learned_Rs, learned_Ts)
         np.savez(
             os.path.join(point_cloud_path, "cam_spline_controls.npz"),
             ctrl_trans=cam_spline.ctrl_trans.detach().cpu().numpy(),
-            ctrl_quats=cam_spline.ctrl_quats.detach().cpu().numpy(),
+            ctrl_quats=ctrl_quats_safe.numpy(),
             n_frames=np.array([total_frames], dtype=np.int32),
         )
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Isolation entrypoint:
-- Default path: static-core (`train_static_core.py`)
+- Default path: static-core (`train_exp.py`)
 - Legacy dynamic path: original SplineGS (`train.py`) only when explicitly requested
 """
 
@@ -41,7 +41,7 @@ def main():
     # STEP2.3: densification_interval=200, MAX_GAUSSIANS=500K
     # STEP3.1: optional --use_dynamic_mask + cached masks from preprocess_dynamic_masks.py (gsam2/synthetic)
     root = Path(__file__).resolve().parent
-    target = root / ("train.py" if args.legacy_dynamic else "train_static_core.py")
+    target = root / ("train.py" if args.legacy_dynamic else "train_exp.py")
 
     mode = "legacy dynamic" if args.legacy_dynamic else "static core"
     print(f"[entrypoint] Mode: {mode}")

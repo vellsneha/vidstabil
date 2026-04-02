@@ -48,7 +48,7 @@ discrete video frames.
    - Same Hermite segment and tangents as `get_pose`; \(\frac{d^2 T}{dt^2} = \alpha^2 \frac{d^2 T}{du^2}\) with \(\alpha = (K-1)/(N-1)\).
    - Differentiable w.r.t. `ctrl_trans`.
 
-2. **`train_static_core.py`**
+2. **`train_exp.py`**
    - When **`iteration >= 2000`**: accumulate `loss_smooth` over all frames, **`loss += w_smooth * loss_smooth`**, **`w_smooth = 1e-2`**.
    - Every main-stage iteration; **no** extra renders.
 
@@ -56,7 +56,7 @@ discrete video frames.
 
 | Symbol | Value | Location |
 |--------|-------|----------|
-| \(w_{\text{smooth}}\) | `1e-2` | `train_static_core.py`, `w_smooth` |
+| \(w_{\text{smooth}}\) | `1e-2` | `train_exp.py`, `w_smooth` |
 
 ---
 
@@ -105,7 +105,7 @@ One random consecutive pair **`t_pair`, `t_pair+1`** with
    - **`loss_jitter_pixel_diff(I0, I1)`** — Laplacian of `I1 - I0`, Frobenius norm.
    - **`loss_jitter_raft_laplacian(I0, I1, device)`** — optional RAFT + Laplacian on flow; **detached** scalar.
 
-2. **`train_static_core.py`**
+2. **`train_exp.py`**
    - **`set_camera_pose_from_spline(...)`** — shared helper for spline pose + projection (used by the main training render and by jitter’s two renders).
    - Two **`render_static`** calls for **\(I_t\)** and **\(I_{t+1}\)** with **`w_jitter = 1e-3`**.
    - Tagged **`# STEP1.4`** throughout.
@@ -114,7 +114,7 @@ One random consecutive pair **`t_pair`, `t_pair+1`** with
 
 | Symbol | Value | Location |
 |--------|-------|----------|
-| \(w_{\text{jitter}}\) | `1e-3` | `train_static_core.py`, `w_jitter` |
+| \(w_{\text{jitter}}\) | `1e-3` | `train_exp.py`, `w_jitter` |
 | Phase switch | `7000` | `if iteration < 7000:` pixel vs RAFT |
 
 ---
@@ -151,7 +151,7 @@ for frame \(t\)). \(N = \texttt{total\_frames}\).
 1. **`utils/fov_loss.py`** (`# STEP1.4` module docstring)
    - **`frozen_low_frequency_translation_reference(T_init)`** → `[N, 3]` detached.
 
-2. **`train_static_core.py`**
+2. **`train_exp.py`**
    - After spline **`initialize_from_poses`**: compute **`T_ref_fov`** once inside
      **`torch.no_grad()`**.
    - When **`iteration >= 2000`**: every main-stage iteration, accumulate
@@ -162,7 +162,7 @@ for frame \(t\)). \(N = \texttt{total\_frames}\).
 
 | Symbol | Value | Location |
 |--------|-------|----------|
-| \(w_{\text{fov}}\) | `1e-3` | `train_static_core.py`, `w_fov` |
+| \(w_{\text{fov}}\) | `1e-3` | `train_exp.py`, `w_fov` |
 
 ---
 
@@ -172,7 +172,7 @@ for frame \(t\)). \(N = \texttt{total\_frames}\).
 
 - Confirms **`# STEP1.4`** markers, main-stage gate, and that the old
   **`stability_loss = torch.tensor(0.0, ...)`** stub is gone.
-- **Term 1 (smooth):** **`loss_smooth`**, **`get_translation_second_derivative`** in `train_static_core.py` and `scene/camera_spline.py`.
+- **Term 1 (smooth):** **`loss_smooth`**, **`get_translation_second_derivative`** in `train_exp.py` and `scene/camera_spline.py`.
 - **Term 2 (jitter):** **`loss_jitter`**, **`iteration % 10 == 0`**, and **`loss_jitter_pixel_diff` / `loss_jitter_raft_laplacian`**.
 - **Term 3 (fov):** **`loss_fov`**, **`frozen_low_frequency_translation_reference`**, **`T_ref_fov`** / **`w_fov`**.
 - **Term 4:** still **`required: False`** until implemented.
@@ -196,7 +196,7 @@ see `verify-1.3.py` for stub / additive checks.
 | `scene/camera_spline.py` | **`get_translation_second_derivative`** |
 | `utils/jitter_loss.py` | **New** — Laplacian, pixel jitter, optional RAFT jitter |
 | `utils/fov_loss.py` | **New** — frozen low-frequency translation reference (Term 3) |
-| `train_static_core.py` | **`set_camera_pose_from_spline`**, **`loss_smooth`**, **`loss_jitter`**, **`loss_fov`**, **`w_smooth`**, **`w_jitter`**, **`w_fov`**, **`T_ref_fov`** |
+| `train_exp.py` | **`set_camera_pose_from_spline`**, **`loss_smooth`**, **`loss_jitter`**, **`loss_fov`**, **`w_smooth`**, **`w_jitter`**, **`w_fov`**, **`T_ref_fov`** |
 | `verify-1.4.py` | Per-term checks; Terms 1–3 **required**; Term 4 optional |
 | `verify-1.3.py` | Additive / stub checks aligned with Step 1.4 |
 
@@ -207,7 +207,7 @@ see `verify-1.3.py` for stub / additive checks.
 ```bash
 python train_entrypoint.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
 # or
-python train_static_core.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
+python train_exp.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
 
 python verify-1.4.py --strict
 ```
@@ -258,13 +258,13 @@ Rules for **this file** (`README-1.4.md`) going forward:
 Summary of what was **added in code** when Term 2 (`L_jitter`) landed (for step-by-step traceability; the full spec remains in *Term 2* above):
 
 - New module `utils/jitter_loss.py`.
-- `train_static_core.py`: jitter block; refactor of inline camera pose into `set_camera_pose_from_spline` (same logic as before, shared with jitter’s two renders).
+- `train_exp.py`: jitter block; refactor of inline camera pose into `set_camera_pose_from_spline` (same logic as before, shared with jitter’s two renders).
 - `verify-1.4.py`: Term 2 checks marked required with patterns for `loss_jitter`, `iteration % 10 == 0`, and jitter helpers.
 
 ### 2026-03-24 — Term 3 implementation trace (reference)
 
 - New module `utils/fov_loss.py` (`frozen_low_frequency_translation_reference`).
-- `train_static_core.py`: one-time **`T_ref_fov`**; **`loss_fov`** each main-stage iteration.
+- `train_exp.py`: one-time **`T_ref_fov`**; **`loss_fov`** each main-stage iteration.
 - `verify-1.4.py`: Term 3 **`required: True`** with patterns for **`loss_fov`** and **`frozen_low_frequency_translation_reference`**.
 - `verify-1.3.py`: additive-loss pattern extended for **`w_fov * loss_fov`**.
 
@@ -277,13 +277,13 @@ Summary of what was **added in code** when Term 2 (`L_jitter`) landed (for step-
 | Date | Files | Summary |
 |------|-------|---------|
 | 2026-03-24 | `README-1.4.md` only | Appended documentation convention, append-only history, and assistant code change log (no rewrites of content above). |
-| 2026-03-24 (Term 2) | `utils/jitter_loss.py` (new), `train_static_core.py`, `verify-1.4.py` | `L_jitter` (pixel Laplacian + optional RAFT); `set_camera_pose_from_spline` refactor; verifier updates for Term 2. |
-| Earlier (Term 1) | `scene/camera_spline.py`, `train_static_core.py`, `verify-1.4.py`, `verify-1.3.py` | `L_smooth` / `get_translation_second_derivative`; stub removal; verifier alignment. |
-| 2026-03-24 (Term 3) | `utils/fov_loss.py` (new), `train_static_core.py`, `verify-1.4.py`, `verify-1.3.py`, `README-1.4.md` | `L_fov` (MSE to frozen low-frequency translation ref); scope + Term 3 doc; verifiers. |
+| 2026-03-24 (Term 2) | `utils/jitter_loss.py` (new), `train_exp.py`, `verify-1.4.py` | `L_jitter` (pixel Laplacian + optional RAFT); `set_camera_pose_from_spline` refactor; verifier updates for Term 2. |
+| Earlier (Term 1) | `scene/camera_spline.py`, `train_exp.py`, `verify-1.4.py`, `verify-1.3.py` | `L_smooth` / `get_translation_second_derivative`; stub removal; verifier alignment. |
+| 2026-03-24 (Term 3) | `utils/fov_loss.py` (new), `train_exp.py`, `verify-1.4.py`, `verify-1.3.py`, `README-1.4.md` | `L_fov` (MSE to frozen low-frequency translation ref); scope + Term 3 doc; verifiers. |
 
 ### 2026-03-24 — Weight tuning update (reference)
 
-Updated Step 1.4 default weights in `train_static_core.py` to match the Term 4
+Updated Step 1.4 default weights in `train_exp.py` to match the Term 4
 spec starting point:
 
 - `w_smooth = 0.1`
@@ -307,7 +307,7 @@ This addendum records the implementation of **Term 4 — \(\mathcal{L}_{\text{di
 - Uses rasterizer-provided visibility (`render_static(...)[\"visibility_filter\"]`) for
   \(\mathcal{V}(t)\cap\mathcal{V}(t+k)\).
 
-### Implemented form in `train_static_core.py`
+### Implemented form in `train_exp.py`
 
 \[
 \mathcal{L}_{\text{dilated}} =
@@ -331,7 +331,7 @@ This addendum records the implementation of **Term 4 — \(\mathcal{L}_{\text{di
 
 ### 2026-03-24 — Term 4 implementation trace (reference)
 
-- `train_static_core.py`: added `world_to_camera_points`; implemented
+- `train_exp.py`: added `world_to_camera_points`; implemented
   dilated co-visibility loss block every 5 iterations with `k=5`.
 - `verify-1.4.py`: Term 4 marked required.
 - `verify-1.3.py`: additive-loss regex extended for Term 4.
@@ -340,5 +340,5 @@ This addendum records the implementation of **Term 4 — \(\mathcal{L}_{\text{di
 
 | Date | Files | Summary |
 |------|-------|---------|
-| 2026-03-24 (Term 4) | `train_static_core.py`, `verify-1.4.py`, `verify-1.3.py`, `README-1.4.md` | `L_dilated` implemented with co-visible Gaussian matching (`k=5`, every 5 iters) and verifier/doc updates. |
-| 2026-03-24 (weights) | `train_static_core.py`, `README-1.4.md` | Default `w_smooth`/`w_jitter`/`w_fov`/`w_dilated` set to spec starting values; README weight-tuning subsection. |
+| 2026-03-24 (Term 4) | `train_exp.py`, `verify-1.4.py`, `verify-1.3.py`, `README-1.4.md` | `L_dilated` implemented with co-visible Gaussian matching (`k=5`, every 5 iters) and verifier/doc updates. |
+| 2026-03-24 (weights) | `train_exp.py`, `README-1.4.md` | Default `w_smooth`/`w_jitter`/`w_fov`/`w_dilated` set to spec starting values; README weight-tuning subsection. |

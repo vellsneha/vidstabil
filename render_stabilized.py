@@ -11,15 +11,18 @@ from arguments import ModelHiddenParams, ModelParams, PipelineParams  # RENDER_P
 from gaussian_renderer import render, render_static  # RENDER_PREP
 from scene import GaussianModel, Scene  # RENDER_PREP
 from scene.camera_spline import CameraSpline  # RENDER_PREP
-from train_static_core import set_camera_pose_from_spline  # RENDER_PREP
+from train_exp import set_camera_pose_from_spline  # RENDER_PREP
 from utils.main_utils import get_pixels  # RENDER_PREP
 from utils.system_utils import searchForMaxIteration  # RENDER_PREP
+from gsplat.rendering import rasterization  # RENDER_PREP
 
 
 def _sanitize_pose(R: torch.Tensor, T: torch.Tensor, device: torch.device, dtype: torch.dtype):
     """Clamp invalid spline outputs to a numerically stable camera pose."""
-    if (not torch.isfinite(R).all()) or (not torch.isfinite(T).all()):
-        return torch.eye(3, device=device, dtype=dtype), torch.zeros(3, device=device, dtype=dtype)
+    if not torch.isfinite(T).all():
+        T = torch.zeros(3, device=device, dtype=dtype)
+    if not torch.isfinite(R).all():
+        return torch.eye(3, device=device, dtype=dtype), T
     U, _, Vh = torch.linalg.svd(R)
     R_proj = U @ Vh
     if torch.linalg.det(R_proj) < 0:
@@ -63,6 +66,37 @@ def _render_dynamic_checked(*args, **kwargs):
         raise
 
 
+def _save_debug_raster_frame(frame_path, viewpoint_camera, stat_gaussians, background):
+    """Save raw pre-rgbdecoder rasterization for one frame."""
+    stat_means3D = stat_gaussians.get_xyz
+    stat_opacity = stat_gaussians.get_opacity
+    stat_colors_precomp = stat_gaussians.get_features_static
+    stat_scales = stat_gaussians.get_scaling
+    stat_rotations = stat_gaussians.get_rotation_stat
+    viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(stat_means3D.device)
+    K = viewpoint_camera.K.to(viewmat.device)
+    bg_color = background[:3]
+    bg_color = torch.concat([bg_color, bg_color, bg_color], dim=-1)
+    rendered_image, _, _ = rasterization(
+        means=stat_means3D,
+        quats=stat_rotations,
+        scales=stat_scales,
+        opacities=stat_opacity.squeeze(-1),
+        colors=stat_colors_precomp,
+        backgrounds=bg_color[None],
+        viewmats=viewmat[None],
+        Ks=K[None],
+        width=int(viewpoint_camera.image_width),
+        height=int(viewpoint_camera.image_height),
+        packed=False,
+        render_mode="RGB+ED",
+    )
+    raw = rendered_image[..., :-1].permute(0, 3, 1, 2).squeeze(0)
+    raw_rgb = raw[:3]
+    raw_np = (raw_rgb.clamp(0, 1).permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype("uint8")
+    cv2.imwrite(frame_path, cv2.cvtColor(raw_np, cv2.COLOR_RGB2BGR))
+
+
 def _legacy_local_viewdirs(cam, focal_np):
     pixels = get_pixels(cam.metadata.image_size_x, cam.metadata.image_size_y, use_center=True)
     batch_shape = pixels.shape[:-1]
@@ -72,6 +106,92 @@ def _legacy_local_viewdirs(cam, focal_np):
     viewdirs = np.stack([x, y, np.ones_like(x)], axis=-1)
     local_viewdirs = viewdirs / np.linalg.norm(viewdirs, axis=-1, keepdims=True)
     return local_viewdirs, batch_shape
+
+
+def _translation_stats(cam_spline: CameraSpline):
+    """Summarize translation motion to catch frozen-trajectory failures."""
+    with torch.no_grad():
+        ts = cam_spline.get_all_translations().detach().cpu().numpy()
+    step = np.linalg.norm(ts[1:] - ts[:-1], axis=1) if len(ts) >= 2 else np.zeros(0, dtype=np.float32)
+    return {
+        "std": ts.std(axis=0),
+        "mean_step": float(step.mean()) if step.size else 0.0,
+        "max_step": float(step.max()) if step.size else 0.0,
+    }
+
+
+def _scaled_spline_translation(cam_spline: CameraSpline, frame_idx: int, trajectory_scale: float):
+    """Scale spline translation relative to frame 0 to keep renders inside scene support."""
+    R0, T0 = cam_spline.get_pose(0.0)
+    Rt, Tt = cam_spline.get_pose(float(frame_idx))
+    if abs(float(trajectory_scale) - 1.0) < 1e-8:
+        return Rt, Tt
+    T_scaled = T0 + float(trajectory_scale) * (Tt - T0)
+    return Rt, T_scaled
+
+
+def _camera_scene_alignment_stats(train_cameras, cam_spline, stat_gaussians, focal_np, trajectory_scale):
+    """Compare rendered camera centers against the learned static Gaussian cloud extent."""
+    xyz = stat_gaussians.get_xyz.detach().cpu().numpy()
+    xyz_min = xyz.min(axis=0)
+    xyz_max = xyz.max(axis=0)
+    xyz_center = 0.5 * (xyz_min + xyz_max)
+    xyz_radius = 0.5 * np.linalg.norm(xyz_max - xyz_min)
+
+    centers = []
+    with torch.no_grad():
+        for t, cam in enumerate(train_cameras):
+            R, T = _scaled_spline_translation(cam_spline, t, trajectory_scale)
+            _apply_pose_override(cam, R, T, focal_np)
+            centers.append(cam.camera_center.detach().cpu().numpy())
+    centers = np.stack(centers, axis=0)
+    dists = np.linalg.norm(centers - xyz_center[None], axis=1)
+    return {
+        "cloud_center": xyz_center,
+        "cloud_radius": float(xyz_radius),
+        "cam_dist_mean": float(dists.mean()),
+        "cam_dist_max": float(dists.max()),
+    }
+
+
+def _visibility_opacity_stats(train_cameras, cam_spline, stat_gaussians, background, focal_np, trajectory_scale):
+    """Sample render-time visibility and opacity stats to detect empty-cloud outputs."""
+    idxs = [0, len(train_cameras) // 4, len(train_cameras) // 2, (3 * len(train_cameras)) // 4, len(train_cameras) - 1]
+    opacity = stat_gaussians.get_opacity.detach()
+    opacity_mean = float(opacity.mean().item())
+    opacity_max = float(opacity.max().item())
+    vis_counts = []
+    with torch.no_grad():
+        for t in idxs:
+            cam = train_cameras[t]
+            R, T = _scaled_spline_translation(cam_spline, t, trajectory_scale)
+            _apply_pose_override(cam, R, T, focal_np)
+            pkg = _render_static_checked(
+                viewpoint_camera=cam,
+                stat_pc=stat_gaussians,
+                dyn_pc=stat_gaussians,
+                bg_color=background,
+                get_static=True,
+            )
+            vis_counts.append(int(pkg["visibility_filter"].sum().item()))
+    return {
+        "sample_vis_counts": vis_counts,
+        "opacity_mean": opacity_mean,
+        "opacity_max": opacity_max,
+    }
+
+
+def _apply_pose_override(viewpoint_cam, R, T, focal_np):
+    """Apply a precomputed pose while reusing train-time camera update logic."""
+    original_get_pose = None
+    class _SinglePose:
+        def __init__(self, R, T):
+            self.R = R
+            self.T = T
+            self.ctrl_trans = R.new_zeros(1)
+        def get_pose(self, _frame_idx):
+            return self.R, self.T
+    set_camera_pose_from_spline(viewpoint_cam, _SinglePose(R, T), focal_np, viewpoint_cam.uid)
 
 
 def _render_legacy_dynamic(model_path, dataset, hyper, output_video, fps, skip_verification):
@@ -171,6 +291,7 @@ def main():  # RENDER_PREP
     parser.add_argument("--expname", type=str, required=True)  # RENDER_PREP
     parser.add_argument("--output_video", type=str, required=True)  # RENDER_PREP
     parser.add_argument("--fps", type=int, default=30)  # RENDER_PREP
+    parser.add_argument("--trajectory_scale", type=float, default=1.0)  # RENDER_PREP
     parser.add_argument("--skip_verification", action="store_true")  # RENDER_PREP
     _args = parser.parse_args(sys.argv[1:])  # RENDER_PREP
     model_path = os.path.abspath(os.path.join("output", _args.expname))  # RENDER_PREP
@@ -288,10 +409,37 @@ def main():  # RENDER_PREP
     original_frames_dir = os.path.join(model_path, "original_frames")  # RENDER_PREP
     if not _args.skip_verification:  # RENDER_PREP
         sample_ts = [0, N // 4, N // 2, (3 * N) // 4, N - 1]  # RENDER_PREP
+        traj_stats = _translation_stats(cam_spline)  # RENDER_PREP
+        align_stats = _camera_scene_alignment_stats(
+            train_cameras, cam_spline, stat_gaussians, focal_np, _args.trajectory_scale
+        )  # RENDER_PREP
+        vis_stats = _visibility_opacity_stats(
+            train_cameras, cam_spline, stat_gaussians, background, focal_np, _args.trajectory_scale
+        )
+        print(  # RENDER_PREP
+            "[CHECK 0] translation_std="
+            f"{traj_stats['std']} mean_step={traj_stats['mean_step']:.6f} max_step={traj_stats['max_step']:.6f}"
+        )
+        print(f"[CHECK 0a] trajectory_scale={_args.trajectory_scale:.3f}")
+        print(
+            "[CHECK 0b] cloud_center="
+            f"{align_stats['cloud_center']} cloud_radius={align_stats['cloud_radius']:.6f} "
+            f"cam_dist_mean={align_stats['cam_dist_mean']:.6f} cam_dist_max={align_stats['cam_dist_max']:.6f}"
+        )
+        print(
+            "[CHECK 0c] sample_vis_counts="
+            f"{vis_stats['sample_vis_counts']} opacity_mean={vis_stats['opacity_mean']:.6f} "
+            f"opacity_max={vis_stats['opacity_max']:.6f}"
+        )
+        if np.max(traj_stats["std"]) < 1e-6 and traj_stats["max_step"] < 1e-6:
+            print(
+                "[CHECK 0] WARNING: learned spline translation is effectively static; "
+                "rendered video may collapse to a frozen view"
+            )
         try:  # RENDER_PREP
             with torch.no_grad():  # RENDER_PREP
                 for t in sample_ts:  # RENDER_PREP
-                    R, T = cam_spline.get_pose(float(t))  # RENDER_PREP
+                    R, T = _scaled_spline_translation(cam_spline, t, _args.trajectory_scale)  # RENDER_PREP
                     R, T = _sanitize_pose(R, T, cam_spline.ctrl_trans.device, cam_spline.ctrl_trans.dtype)
                     assert R.shape == (3, 3), f"R shape wrong at t={t}"  # RENDER_PREP
                     assert T.shape == (3,), f"T shape wrong at t={t}"  # RENDER_PREP
@@ -307,7 +455,8 @@ def main():  # RENDER_PREP
             with torch.no_grad():  # RENDER_PREP
                 for t in sample_ts:  # RENDER_PREP
                     cam = train_cameras[t]  # RENDER_PREP
-                    set_camera_pose_from_spline(cam, cam_spline, focal_np, t)  # RENDER_PREP
+                    R, T = _scaled_spline_translation(cam_spline, t, _args.trajectory_scale)
+                    _apply_pose_override(cam, R, T, focal_np)  # RENDER_PREP
                     pkg = _render_static_checked(  # RENDER_PREP
                         viewpoint_camera=cam,  # RENDER_PREP
                         stat_pc=stat_gaussians,  # RENDER_PREP
@@ -338,11 +487,13 @@ def main():  # RENDER_PREP
                     for k in range(nfrm - 1):  # RENDER_PREP
                         t0, t1 = start + k, start + k + 1  # RENDER_PREP
                         c0, c1 = train_cameras[t0], train_cameras[t1]  # RENDER_PREP
-                        set_camera_pose_from_spline(c0, cam_spline, focal_np, t0)  # RENDER_PREP
+                        R0, T0 = _scaled_spline_translation(cam_spline, t0, _args.trajectory_scale)
+                        _apply_pose_override(c0, R0, T0, focal_np)  # RENDER_PREP
                         I0 = _render_static_checked(  # RENDER_PREP
                             c0, stat_gaussians, stat_gaussians, background, get_static=True  # RENDER_PREP
                         )["render"]  # RENDER_PREP
-                        set_camera_pose_from_spline(c1, cam_spline, focal_np, t1)  # RENDER_PREP
+                        R1, T1 = _scaled_spline_translation(cam_spline, t1, _args.trajectory_scale)
+                        _apply_pose_override(c1, R1, T1, focal_np)  # RENDER_PREP
                         I1 = _render_static_checked(  # RENDER_PREP
                             c1, stat_gaussians, stat_gaussians, background, get_static=True  # RENDER_PREP
                         )["render"]  # RENDER_PREP
@@ -353,7 +504,12 @@ def main():  # RENDER_PREP
                     stabilized_diff = sum(stab_diffs) / len(stab_diffs)  # RENDER_PREP
                     original_diff = sum(orig_diffs) / len(orig_diffs)  # RENDER_PREP
                     print(f"[CHECK 3] stabilized_mean_abs_diff={stabilized_diff:.6f} original_mean_abs_diff={original_diff:.6f}")  # RENDER_PREP
-                    if stabilized_diff < original_diff * 1.5:  # RENDER_PREP
+                    if stabilized_diff < max(original_diff * 0.02, 1e-4):  # RENDER_PREP
+                        print(
+                            "[CHECK 3] WARNING: stabilized frames are nearly identical; "
+                            "this usually means the learned trajectory is frozen"
+                        )
+                    elif stabilized_diff < original_diff * 1.5:  # RENDER_PREP
                         print("[CHECK 3] Stabilized frames smoother than input: PASS")  # RENDER_PREP
                     else:  # RENDER_PREP
                         print("[CHECK 3] Stabilized frames smoother than input: FAIL (diagnostic only, continuing)")  # RENDER_PREP
@@ -365,7 +521,8 @@ def main():  # RENDER_PREP
         with torch.no_grad():  # RENDER_PREP
             for t in sample_ts:  # RENDER_PREP
                 cam = train_cameras[t]  # RENDER_PREP
-                set_camera_pose_from_spline(cam, cam_spline, focal_np, t)  # RENDER_PREP
+                R, T = _scaled_spline_translation(cam_spline, t, _args.trajectory_scale)
+                _apply_pose_override(cam, R, T, focal_np)  # RENDER_PREP
                 img = _render_static_checked(  # RENDER_PREP
                     cam, stat_gaussians, stat_gaussians, background, get_static=True  # RENDER_PREP
                 )["render"]  # RENDER_PREP
@@ -390,9 +547,13 @@ def main():  # RENDER_PREP
     output_frames_dir = output_video.replace(".mp4", "_frames/")  # RENDER_PREP
     os.makedirs(output_frames_dir, exist_ok=True)  # RENDER_PREP
     os.makedirs(original_frames_dir, exist_ok=True)  # RENDER_PREP
+    debug_raw_frame_path = os.path.join(model_path, "debug_raw_raster_00050.png")
     with torch.no_grad():  # RENDER_PREP
         for t, cam in enumerate(tqdm(train_cameras, desc="Rendering")):  # RENDER_PREP
-            set_camera_pose_from_spline(cam, cam_spline, focal_np, t)  # RENDER_PREP
+            R, T = _scaled_spline_translation(cam_spline, t, _args.trajectory_scale)
+            _apply_pose_override(cam, R, T, focal_np)  # RENDER_PREP
+            if t == min(50, N - 1):
+                _save_debug_raster_frame(debug_raw_frame_path, cam, stat_gaussians, background)
             pkg = _render_static_checked(cam, stat_gaussians, stat_gaussians, background, get_static=True)  # RENDER_PREP
             img = pkg["render"]  # RENDER_PREP
             img_np = (img.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0).astype("uint8")  # RENDER_PREP

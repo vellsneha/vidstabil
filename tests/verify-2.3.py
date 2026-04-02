@@ -17,7 +17,7 @@ Checks:
       (densify_from_iter, densify_until_iter, densify_grad_threshold
        opacity_reset_interval must be unchanged)
 
-  Static (train_static_core.py):
+  Static (train_exp.py):
   4.  STEP2.3 comments present
   5.  MAX_GAUSSIANS = 500_000 constant defined
   6.  prune_points call present after densify_and_prune (cap enforcement)
@@ -62,7 +62,7 @@ def warn(name, detail=""):
         print(f"       {detail}")
 
 ARGS_FILE   = "arguments/__init__.py"
-TRAIN_FILE  = "train_static_core.py"
+TRAIN_FILE  = "train_exp.py"
 ENTRY_FILE  = "train_entrypoint.py"
 SPLINE_FILE = "scene/camera_spline.py"
 
@@ -146,18 +146,18 @@ if args_src is not None:
     else:
         warn("opacity_reset_interval not found — may be named differently")
 
-print("\n── Static analysis of train_static_core.py ──────────────────────────\n")
+print("\n── Static analysis of train_exp.py ──────────────────────────\n")
 
 # ── 4. STEP2.3 comments in train ─────────────────────────────────────────────
 n23 = train_src.count("# STEP2.3")
-check("# STEP2.3 comments present in train_static_core.py",
+check("# STEP2.3 comments present in train_exp.py",
       n23 > 0, f"found {n23} occurrence(s)")
 
 # ── 5. MAX_GAUSSIANS = 500_000 ────────────────────────────────────────────────
 # Accept 500_000 or 500000
 max_g_pattern = re.compile(r"MAX_GAUSSIANS\s*=\s*(500[_]?000|500000)")
 has_max_g = bool(max_g_pattern.search(train_src))
-check("MAX_GAUSSIANS = 500_000 constant defined in train_static_core.py",
+check("MAX_GAUSSIANS = 500_000 constant defined in train_exp.py",
       has_max_g,
       "look for: MAX_GAUSSIANS = 500_000  # STEP2.3")
 

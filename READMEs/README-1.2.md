@@ -3,7 +3,7 @@
 Replaces the per-frame `pose_network` with a cubic Hermite spline in SE(3),
 parameterised by K = N // 5 control points.
 
-**Builds on:** Step 1.1 (static-core training path in `train_static_core.py`)
+**Builds on:** Step 1.1 (static-core training path in `train_exp.py`)
 
 ---
 
@@ -42,7 +42,7 @@ pose_network's thousands of MLP weights (equivalent per-frame DOF = 150 × 6 = 9
   - Converts sampled rotation matrices to unit quaternions (Shepperd's method).
   - Runs under `torch.no_grad()`; sets `ctrl_trans.data` and `ctrl_quats.data`.
 
-### 2) Modified `train_static_core.py`
+### 2) Modified `train_exp.py`
 
 **Warm-start (before training loop)**
 
@@ -123,7 +123,7 @@ python verify-1.2.py
 - `get_all_poses(150)` returns 150 pairs with correct shapes
 - `optimizer.step()` updates control points
 - Trajectory is smooth (max jump < 10× mean jump)
-- `train_static_core.py` imports and uses `CameraSpline`
+- `train_exp.py` imports and uses `CameraSpline`
 - `update_cam` not called inside training loop
 - `# STEP1.2` comments present in both modified files
 - No `.numpy()` or `.detach()` calls in `get_pose` forward path
@@ -146,7 +146,7 @@ python verify-1.2.py
 | File | Change |
 |---|---|
 | `scene/camera_spline.py` | **New** — `CameraSpline` class |
-| `train_static_core.py` | Import, warm-start, optimizer group, loop refactor |
+| `train_exp.py` | Import, warm-start, optimizer group, loop refactor |
 | `train_entrypoint.py` | One comment added |
 | `verify-1.2.py` | Import method fixed (`importlib.util`) |
 

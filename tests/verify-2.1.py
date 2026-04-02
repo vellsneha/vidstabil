@@ -6,13 +6,13 @@ Run from repo root:
 
 Verifies Step 2.1 — chunked windowed optimization.
 Architecture context (from Steps 1.1–1.4):
-  - train_static_core.py is the active file
+  - train_exp.py is the active file
   - cam_spline (CameraSpline) is global, shared across chunks
   - render_static is the renderer
   - stability losses and weights are unchanged from Step 1.4
 
 Checks:
-  Static analysis (train_static_core.py):
+  Static analysis (train_exp.py):
   1.  STEP2.1 comments present
   2.  CHUNK_THRESHOLD, CHUNK_SIZE, OVERLAP constants defined
   3.  build_chunk_indices function exists (top-level)
@@ -64,7 +64,7 @@ def warn(name, detail=""):
     if detail:
         print(f"       {detail}")
 
-TRAIN_FILE   = "train_static_core.py"
+TRAIN_FILE   = "train_exp.py"
 ENTRY_FILE   = "train_entrypoint.py"
 SPLINE_FILE  = "scene/camera_spline.py"
 
@@ -83,11 +83,11 @@ if train_src is None:
     print(f"{FAIL} {TRAIN_FILE} not found — run from repo root")
     sys.exit(1)
 
-print("\n── Static analysis of train_static_core.py ──────────────────────────\n")
+print("\n── Static analysis of train_exp.py ──────────────────────────\n")
 
 # ── 1. STEP2.1 comments ───────────────────────────────────────────────────────
 n21 = train_src.count("# STEP2.1")
-check("# STEP2.1 comments present in train_static_core.py",
+check("# STEP2.1 comments present in train_exp.py",
       n21 > 0, f"found {n21} occurrence(s)")
 
 # ── 2. Constants defined ──────────────────────────────────────────────────────

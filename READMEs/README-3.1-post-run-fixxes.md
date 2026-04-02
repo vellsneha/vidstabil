@@ -242,7 +242,7 @@ Important changes:
 
 Files involved:
 
-- `train_static_core.py`
+- `train_exp.py`
 - `scene/camera_spline.py`
 - `profile-2.4.py`
 
@@ -559,7 +559,7 @@ CUDA_LAUNCH_BLOCKING=1
 - `gen_tracks.py`
 - `scene/dataset_readers.py`
 - `scene/camera_spline.py`
-- `train_static_core.py`
+- `train_exp.py`
 - `train.py`
 - `arguments/__init__.py`
 - `profile-2.4.py`

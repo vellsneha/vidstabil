@@ -13,7 +13,7 @@ Checks:
     2. photometric_loss_masked_dynamic defined; uses (1 - M_t) weighting
   Static (scene/cameras.py, dataset.py, dataset_readers.py):
     3. dynamic_mask_t on Camera / CameraInfo / dataset path
-  Static (train_static_core.py):
+  Static (train_exp.py):
     4. STEP3.1 masked photometric path
   Logic (torch):
     5. L1 term matches ||(pred - gt) * (1 - M_t)||_1 / sum(1-M_t) (masked mean)
@@ -59,7 +59,7 @@ LOSS = "utils/loss_utils.py"
 CAM = "scene/cameras.py"
 DS = "scene/dataset.py"
 READ = "scene/dataset_readers.py"
-TRAIN = "train_static_core.py"
+TRAIN = "train_exp.py"
 PRE = "preprocess_dynamic_masks.py"
 
 

@@ -6,7 +6,7 @@ python train_entrypoint.py -s /path/to/scene --expname run --use_dynamic_mask
 
 Exclude **moving-object pixels** from the photometric term so transient content (people, cars, etc.) does not create “ghost Gaussians” or dominate \( \mathcal{L}_{photo} \).
 
-**Builds on:** Phase 2 training (`train_static_core.py`, chunked and single-scene paths). Masks are **precomputed** once per video and **cached** on disk; training only reads them.
+**Builds on:** Phase 2 training (`train_exp.py`, chunked and single-scene paths). Masks are **precomputed** once per video and **cached** on disk; training only reads them.
 
 ---
 
@@ -73,7 +73,7 @@ When `use_dynamic_mask` is `True` but mask files are missing, a **single** warni
 
 ---
 
-## Change 5 — Training loop (`train_static_core.py`)
+## Change 5 — Training loop (`train_exp.py`)
 
 - After `use_masked_photo = bool(dataset.use_dynamic_mask)`, both the **single-scene** and **`_train_chunked`** branches call `photometric_loss_masked_dynamic` when `viewpoint_cam.dynamic_mask_t` is not `None`.
 - If masks are disabled or missing, behaviour matches **Phase 2** (plain L1 + DSSIM).
@@ -161,7 +161,7 @@ Checks include: `ModelParams` fields, loss implementation, dataset and training 
 | `scene/dataset_readers.py` | Load `dynamic_masks/{t:03d}.png`; `CameraInfo.dynamic_mask_t` |
 | `scene/cameras.py` | `Camera.dynamic_mask_t` |
 | `scene/dataset.py` | Pass-through to `Camera` |
-| `train_static_core.py` | Masked L_photo in both training branches |
+| `train_exp.py` | Masked L_photo in both training branches |
 | `train_entrypoint.py` | Comment pointer to Step 3.1 |
 | `gsam2/integrated.py` | In-process Grounded SAM 2 mask generation |
 | `preprocess_dynamic_masks.py` | CLI: `gsam2` (default) or `synthetic` |
@@ -199,5 +199,5 @@ Checks include: `ModelParams` fields, loss implementation, dataset and training 
 |------|-------|---------|
 | 2026-03-30 | `arguments/__init__.py` | `use_dynamic_mask`, `dynamic_mask_subdir` |
 | 2026-03-30 | `utils/loss_utils.py` | `photometric_loss_masked_dynamic` |
-| 2026-03-30 | `scene/*`, `train_static_core.py` | Load and apply `dynamic_mask_t` |
+| 2026-03-30 | `scene/*`, `train_exp.py` | Load and apply `dynamic_mask_t` |
 | 2026-03-30 | `gsam2/*`, `preprocess_dynamic_masks.py`, `requirements-gsam2.txt`, `README-3.1.md`, `verify-3.1.py` | Integrated GSAM2 + docs + verification |

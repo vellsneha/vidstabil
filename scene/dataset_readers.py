@@ -96,6 +96,9 @@ def getNerfppNorm(cam_info):
 
     center, diagonal = get_center_and_diag(cam_centers)
     radius = diagonal * 1.1
+    # Monocular video scenes in this project often start with identity poses for all frames.
+    # Avoid a zero scene extent, which would zero out spatial learning rates downstream.
+    radius = max(float(radius), 1.0)
 
     translate = -center
     return {"translate": translate, "radius": radius}

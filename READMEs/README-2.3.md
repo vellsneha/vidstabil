@@ -78,7 +78,7 @@ MAX_GAUSSIANS   = 500_000  # STEP2.3 — Gaussian count cap
 
 ### What was added first
 
-`train_static_core.py` had **no densification call** prior to Step 2.3.
+`train_exp.py` had **no densification call** prior to Step 2.3.
 The codebase-standard `controlgaussians(...)` function (from
 `scene/gaussian_model.py`) was imported and wired into both the
 single-scene path and `_train_chunked`. `controlgaussians` calls
@@ -206,7 +206,7 @@ N_sim=300_000 (below cap)      → no prune needed ✓
 from scene.gaussian_model import controlgaussians  # STEP2.3
 ```
 
-Added at the top of `train_static_core.py` alongside the existing imports.
+Added at the top of `train_exp.py` alongside the existing imports.
 
 ---
 
@@ -268,7 +268,7 @@ python verify-2.3.py  # 23/23
 - `# STEP2.3` comment on that line.
 - `densify_from_iter`, `densify_until_iter`, `densify_grad_threshold`,
   `opacity_reset_interval` all unchanged.
-- `MAX_GAUSSIANS = 500_000` constant in `train_static_core.py`.
+- `MAX_GAUSSIANS = 500_000` constant in `train_exp.py`.
 - `MAX_GAUSSIANS` value is exactly 500000.
 - Densification call (`controlgaussians`) present in training loop.
 - `prune_points` call present for cap enforcement.
@@ -289,7 +289,7 @@ python verify-2.3.py  # 23/23
 | File | Change |
 |------|--------|
 | `arguments/__init__.py` | `densification_interval`: `100` → `200` |
-| `train_static_core.py` | `controlgaussians` import; `MAX_GAUSSIANS` constant; `flag_s` init; densification + cap block in single-scene path; `chunk_flag_s` init; densification + cap block in `_train_chunked`; `scene` parameter added to `_train_chunked`; `n_gauss` in progress bar |
+| `train_exp.py` | `controlgaussians` import; `MAX_GAUSSIANS` constant; `flag_s` init; densification + cap block in single-scene path; `chunk_flag_s` init; densification + cap block in `_train_chunked`; `scene` parameter added to `_train_chunked`; `n_gauss` in progress bar |
 | `train_entrypoint.py` | One `# STEP2.3` comment |
 | `verify-2.3.py` | Three verifier bug fixes (underscore integer parsing; wrong expected threshold; missing fork-specific densification name) |
 
@@ -301,7 +301,7 @@ internals, `utils/` modules, stability loss weights.
 ## How to run
 
 ```bash
-python train_static_core.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
+python train_exp.py -s data/nvidia_rodynrf/<SCENE>/ --expname my_run
 python verify-2.3.py   # 23/23
 ```
 
@@ -312,7 +312,7 @@ python verify-2.3.py   # 23/23
 ### 2026-03-26 — Step 2.3 implemented
 
 - `arguments/__init__.py`: `densification_interval` `100` → `200`.
-- `train_static_core.py`: `MAX_GAUSSIANS = 500_000`; `controlgaussians`
+- `train_exp.py`: `MAX_GAUSSIANS = 500_000`; `controlgaussians`
   import and wiring in both training paths; `chunk_flag_s` per-chunk reset;
   `scene` parameter added to `_train_chunked`; `n_gauss` progress bar key.
 - `train_entrypoint.py`: `# STEP2.3` comment.
@@ -326,6 +326,6 @@ python verify-2.3.py   # 23/23
 | Date | Files | Summary |
 |------|-------|---------|
 | 2026-03-26 | `arguments/__init__.py` | `densification_interval` `1_00` → `200`; `# STEP2.3 was 100` comment. |
-| 2026-03-26 | `train_static_core.py` | `controlgaussians` import; `MAX_GAUSSIANS=500_000` constant; densification blocks (radii, absgrad stats, `controlgaussians` call, cap) in both single-scene and chunked paths; `n_gauss` in tqdm postfix. |
+| 2026-03-26 | `train_exp.py` | `controlgaussians` import; `MAX_GAUSSIANS=500_000` constant; densification blocks (radii, absgrad stats, `controlgaussians` call, cap) in both single-scene and chunked paths; `n_gauss` in tqdm postfix. |
 | 2026-03-26 | `train_entrypoint.py` | `# STEP2.3: densification_interval=200, MAX_GAUSSIANS=500K`. |
 | 2026-03-26 | `verify-2.3.py` | Underscore-integer parsing for `densify_until_iter`; corrected `densify_grad_threshold` expected value to fork's `0.0008`; broadened densification-call pattern to include `controlgaussians` and `densify_pruneclone`. |

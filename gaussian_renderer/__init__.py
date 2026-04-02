@@ -323,7 +323,7 @@ def render(
         opacities=opacity_final.squeeze(-1),
         colors=colors_precomp_final,
         backgrounds=bg_color[None],
-        viewmats=viewmat[None].detach(),  # [C, 4, 4]
+        viewmats=viewmat[None],  # [C, 4, 4] keep camera-pose gradients for static-core training
         Ks=K[None],  # [C, 3, 3]
         width=int(viewpoint_camera.image_width),
         height=int(viewpoint_camera.image_height),

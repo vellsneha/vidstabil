@@ -6,7 +6,7 @@ Run from the root of your SplineGS fork:
 
 Checks every requirement from Step 1.2, accounting for the actual
 Step 1.1 architecture:
-  - Entry point:  train_static_core.py  (not train.py)
+  - Entry point:  train_exp.py  (not train.py)
   - Pose source:  pose_network via create_pose_network / update_cam
   - Renderer:     gaussian_renderer.render_static
   - Scene:        GaussianModel + stat_gaussians
@@ -24,8 +24,8 @@ Checks:
   10. get_all_poses(N) returns exactly N (R,T) pairs
   11. Optimizer receives and updates spline parameters
   12. Trajectory is smooth — no discontinuous jumps
-  13. train_static_core.py imports and uses CameraSpline
-  14. train_static_core.py no longer calls update_cam in training loop
+  13. train_exp.py imports and uses CameraSpline
+  14. train_exp.py no longer calls update_cam in training loop
   15. STEP1.2 comments present in both modified files
   16. get_pose contains no numpy calls or .detach() in forward path
 """
@@ -235,9 +235,9 @@ try:
 except Exception as e:
     check("Trajectory smoothness", False, str(e))
 
-# ── 13 & 14. train_static_core.py ────────────────────────────────────────────
-print("\n── Checking train_static_core.py ────────────────────────────────────\n")
-TRAIN_FILE = "train_static_core.py"
+# ── 13 & 14. train_exp.py ────────────────────────────────────────────
+print("\n── Checking train_exp.py ────────────────────────────────────\n")
+TRAIN_FILE = "train_exp.py"
 train_src = None
 if os.path.exists(TRAIN_FILE):
     with open(TRAIN_FILE) as f:
